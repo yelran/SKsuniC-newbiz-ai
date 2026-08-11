@@ -1,36 +1,3 @@
-"""
-F4-1. 아이디어 요구역량 추출 (담당: 김민주)
-
-정형 입력(진출산업/문제/시장/고객) + "신규 아이디어 추정치"를 Structured Output으로 변환한다.
-
-설계
-----
-요구역량 축은 표준역량 32개(f4_common.CAPABILITY_CHOICES = F1.load_standard_capability_choices(),
-F3-2가 실제로 채점하는 축)를 쓴다. 2026-08-09 이전에는 F1의 조직 보유 capability_id
-10~11개를 축으로 썼는데, 그러면 아이디어의 필요역량이 항상 조직이 이미 가진 것의
-부분집합이 되어 missing이 구조적으로 항상 비고 역량전이가능성이 모든 아이디어에서
-0점으로 깔리는 문제가 있었다. 32개로 넓혀서 조직이 못 가진 역량도 요구역량으로 잡히게
-한다(그래야 F3-2가 실제 부족역량을 계산할 수 있다).
-
-1차(로컬, 무료): 문제/고객 설명 같은 자유서술 텍스트를 로컬 임베딩(sentence-transformers)
-    + 표준역량_정의.csv의 LLM용설명 텍스트로 이 32개 축에 정규화한다.
-2차(fallback, 유료): 1차 결과의 신뢰도가 낮을 때만("신규 아이디어 추정치"가 필요한 경우)
-    OpenAI Responses API(structured output)로 부족한 부분을 보완한다. 조직이 뭘 가졌는지는
-    LLM에게 알려주지 않는다(알려주면 "이미 가진 것 위주로" 고르는 편향이 생겨 위 문제가
-    재발한다 — 보유 여부 판정은 F3-2가 별도로 한다). capability_id는 32개 값으로만
-    답하도록 스키마에서 강제(enum 제약)하고, 응답을 받은 뒤에도 한 번 더 화이트리스트로
-    검증한다(이중 방어). 32개에도 없는 요구역량은 자유서술(unmatched_capabilities, 최대
-    2개)로 받되 채점엔 넣지 않는다 — 표준역량_정의.csv에 행이 없는 항목을 억지로
-    숫자화하면 근거 없는 값이 되기 때문이다.
-
-extract_idea_requirements(user_input) -> JSON
-    user_input: {"industry": str, "problem": str, "market": str, "customer": str}
-
-참고: 역량 정규화 로직(capability_mapping)은 원래 별도 공용 모듈이었으나, 통합 편의를
-위해 이 파일로 합쳤다. F4-2.py는 이 축을 안 쓰고 f4_common의 텍스트 유틸만 써서,
-이 파일에는 의존하지 않는다.
-"""
-
 import importlib.util
 import os
 from functools import lru_cache
@@ -53,13 +20,9 @@ BASE = Path(__file__).parent
 
 
 # ---------------------------------------------------------------
-# 0. 역량 정규화 (구 capability_mapping.py) — 표준역량 32개 축으로 자유서술 텍스트를
-#    매핑. 외부 API를 쓰지 않는다(로컬 임베딩만 사용, 비용 없음).
+# 0. 역량 정규화 
 # ---------------------------------------------------------------
-# F1은 통합 폴더에서 core/upload/에 있다. 여기(core/idea_fit/) 옆이 아니다.
-# 경로 후보 탐색은 f4_common.load_f1()이 이미 갖고 있으므로 그걸 쓴다.
-# (F4-2·F4-3도 같은 함수를 쓴다. 로더가 파일마다 따로 있으면 폴더가 바뀔 때
-#  한 군데만 고쳐지고 나머지가 조용히 깨진다.)
+
 from f4_common import (  # noqa: E402
     CAP_ID_VALUES,
     CAP_NAME_BY_ID,
@@ -70,11 +33,7 @@ from f4_common import (  # noqa: E402
 )
 
 f1 = load_f1()
-# 2026-08-09: 요구역량 축을 조직 보유 11개(F1.CAPABILITY_DEFINITIONS)에서 표준역량
-# 32개(f4_common.CAPABILITY_CHOICES, F3-2가 실제로 채점하는 축)로 넓혔다. 11개
-# 축이면 아이디어의 필요역량이 항상 조직이 이미 가진 것의 부분집합이 되어 missing이
-# 구조적으로 항상 비고, 역량전이가능성이 모든 아이디어에서 0점으로 깔렸었다.
-# CAPABILITY_DEFINITIONS라는 이름은 유지한다(아래 코드가 이 변수명을 그대로 씀).
+
 CAPABILITY_DEFINITIONS = [
     {"capability_id": c["id"], "name": c["name"], "desc": c.get("desc", "")}
     for c in CAPABILITY_CHOICES
@@ -82,12 +41,7 @@ CAPABILITY_DEFINITIONS = [
 
 EMBEDDING_MODEL_NAME = "jhgan/ko-sroberta-multitask"  # main.py(F2-2)와 동일 모델 — 로딩 캐시 공유 목적
 
-# 예전엔 11개 카테고리용으로 수작업 키워드(EXTRA_KEYWORDS)를 만들어 임베딩을
-# 보강했다. 32개 전체용 키워드 세트는 검증된 게 없어서(잘못 만들면 엉뚱한
-# 보너스를 줄 위험), 이번엔 표준역량_정의.csv의 LLM용설명을 참조 텍스트에
-# 그대로 포함시키는 것으로 대체한다 — desc가 이름보다 풍부한 의미 신호를 준다.
-# 필요하면 나중에 32개용 키워드를 다시 수작업으로 추가할 수 있다(키만 채우면
-# keyword_hits가 자동으로 다시 작동한다).
+
 EXTRA_KEYWORDS: dict[str, list[str]] = {}
 
 
@@ -149,17 +103,7 @@ def map_text_to_capabilities(text: str, top_k: int = 3, sim_threshold: float = 0
 
 
 def confidence_level(results: list) -> str:
-    """OpenAI fallback을 트리거할지 판단하는 데 쓰는 신뢰도 등급.
-
-    주의: map_text_to_capabilities가 이미 score>=sim_threshold(0.35) 또는
-    keyword_hits>0인 항목만 통과시키므로, 여기 도달하는 top 항목은 항상
-    그 둘 중 하나를 만족한다 — 즉 "low"(top score<0.35 & 키워드 无)는 현재
-    파라미터 조합에서는 구조적으로 도달 불가능하다(2026-08-05 실측 확인:
-    실제 사업 아이디어 문장은 이 임베딩 모델 기준 무관한 내용이어도 유사도가
-    보통 0.35~0.46 사이라 전부 medium으로 잡히고, "none"은 "날씨가 좋다"류의
-    아예 무의미한 입력에서만 나옴). 그래서 LOW_CONFIDENCE_LEVELS에 "medium"도
-    포함시켜야 실제 애매한 아이디어에서 fallback이 걸린다.
-    """
+    
     if not results:
         return "none"
     top = results[0]
@@ -174,22 +118,14 @@ def confidence_level(results: list) -> str:
 # 1. 설정
 # ---------------------------------------------------------------
 OPENAI_MODEL = os.environ.get("F4_1_OPENAI_MODEL", "gpt-5.6-terra")
-# "low"는 confidence_level docstring 참고 — 현재 파라미터로는 도달 불가능한 등급.
-# 실측 결과 "medium"이 사실상 "이 임베딩 모델 기준으로 뚜렷한 연관 카테고리를 못 찾음"에
-# 해당해서(노이즈 바닥이 0.35~0.46), "medium"도 fallback 대상에 포함시켜야
-# 실제 애매한 아이디어에서 LLM 보완이 걸린다(2026-08-05 실측 후 수정).
+
 LOW_CONFIDENCE_LEVELS = {"medium", "low", "none"}
 
-# _CAP_ID_VALUES/_CAP_NAME_BY_ID/CapabilityIdLiteral은 f4_common에서 그대로 가져온다
-# (F4-3도 같은 걸 쓴다 — 요구역량 축이 두 파일에서 갈라지면 서로 다른 ID를 낼 수 있다).
+
 _CAP_ID_VALUES = CAP_ID_VALUES
 _CAP_NAME_BY_ID = CAP_NAME_BY_ID
 
-# 표준역량 32개에도 없는 요구역량을 LLM이 자유서술로 낼 수 있는 상한.
-# 점수(F3-2)엔 반영하지 않고 화면에 "표준 목록에 없는 역량(AI 판단)"으로만 표시한다
-# (F3-2의 채점 함수들이 표준역량_정의.csv의 행을 전제하므로, 행이 없는 자유서술
-# 항목을 억지로 숫자화하면 근거 없는 값이 된다 — 2026-08-09 판단).
-# 남발 방지용 상한이라 낮게 잡는다. 필요하면 실측 보고 조정.
+
 MAX_UNMATCHED_CAPABILITIES = 2
 
 
@@ -246,9 +182,7 @@ def _llm_estimate_capabilities(idea: IdeaInput) -> LLMCapabilityEstimate:
     client = _get_openai_client()
     capability_menu = "\n".join(f"- {cid}: {name}" for cid, name in _CAP_NAME_BY_ID.items())
 
-    # 조직이 뭘 가졌는지는 절대 알려주지 않는다 — 알려주면 "이미 가진 것 위주로"
-    # 고르는 편향이 생겨서, 원래 문제(missing이 항상 비어 역량전이가능성이 항상
-    # 0점)가 다시 재발한다. 보유 여부 판정은 이 함수 밖(F3-2)에서 한다.
+   
     system_prompt = (
         "너는 신사업 진입 전략 분석가다. 사용자가 설명한 신규 아이디어를 실행하려면 "
         "아래 표준역량 카테고리 중 어떤 것들이 필요할지 추정한다. 이 조직이 지금 "
@@ -280,7 +214,6 @@ def _llm_estimate_capabilities(idea: IdeaInput) -> LLMCapabilityEstimate:
         text_format=LLMCapabilityEstimate,
     )
     estimate = resp.output_parsed
-    # 이중 방어 — 프롬프트로 상한을 말해도 코드에서 한 번 더 자른다(다른 F4 파일들과 같은 패턴).
     estimate.unmatched_capabilities = estimate.unmatched_capabilities[:MAX_UNMATCHED_CAPABILITIES]
     return estimate
 
@@ -352,7 +285,7 @@ def extract_idea_requirements(user_input: dict) -> dict:
                 })
                 existing_ids.add(cid)
         except Exception as e:
-            print(f"⚠️ OpenAI fallback 실패, 로컬 매핑 결과만 사용합니다: {e}")
+            print(f" OpenAI fallback 실패, 로컬 매핑 결과만 사용합니다: {e}")
 
     return {
         "input": idea.model_dump(),
