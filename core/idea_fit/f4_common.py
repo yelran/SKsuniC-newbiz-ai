@@ -1,20 +1,3 @@
-"""
-F4 공용 유틸 (F4-2 / F4-3 공유)
-
-F4-2(재정렬)와 F4-3(신규 제안)을 별도 파일로 나누면서, 두 파일이 똑같이 필요로 하는
-부분만 여기로 뺐다.
-
-  - F1.CAPABILITY_DEFINITIONS 로드 (여러 위치를 순서대로 탐색)
-  - capability_id enum / name 매핑
-  - OpenAI 클라이언트
-  - 프롬프트에 넣을 조직 프로필·후보 목록 텍스트
-  - evidence_id 화이트리스트
-
-파일명에 하이픈이 없으므로 `import f4_common` 으로 그냥 불러 쓸 수 있다.
-(F4-1.py / F4-2.py / F4-3.py 는 하이픈 때문에 importlib이 필요하다 — app 폴더로
-옮길 때는 f4_1_extract.py 처럼 밑줄 이름으로 바꾸는 것을 권장.)
-"""
-
 import importlib.util
 import os
 from functools import lru_cache
@@ -22,8 +5,6 @@ from pathlib import Path
 from typing import Literal
 
 try:
-    # 로컬 개발용 .env에서 OPENAI_API_KEY를 읽는다.
-    # 배포(Streamlit)에서는 st.secrets를 쓰므로 python-dotenv가 없어도 동작해야 한다.
     from dotenv import load_dotenv
 
     load_dotenv()
@@ -32,8 +13,7 @@ except ImportError:
 
 BASE = Path(__file__).parent
 
-# F1.py 위치 후보 — 개발 중에는 F4 폴더 옆, 통합 후에는 app/upload/F1.py 에 있다.
-# F1_PATH 환경변수로 직접 지정할 수도 있다.
+
 F1_SEARCH_PATHS = [
     Path(os.environ["F1_PATH"]) if os.environ.get("F1_PATH") else None,
     BASE / "F1.py",
@@ -45,7 +25,6 @@ F1_SEARCH_PATHS = [
 
 @lru_cache(maxsize=1)
 def load_f1():
-    """F1 모듈을 로드한다. 어디에도 없으면 어디를 찾았는지 알려주고 실패."""
     tried = []
     for p in F1_SEARCH_PATHS:
         if p is None:
@@ -64,23 +43,10 @@ def load_f1():
 
 
 # ─────────────────────────────────────────────────────────────
-# 요구역량 축 — 표준역량 32개 (F4-1 요구역량 추출 · F4-3 신규 후보 제안 공용)
-#
-# 원래는 F1.CAPABILITY_DEFINITIONS(조직이 실제 보유한 카테고리 10~11개)를 이
-# 축으로 썼다. 그러면 "이 아이디어에 필요한 역량"도 조직이 이미 가진 것 중에서만
-# 고를 수 있어, 아이디어 요구역량이 항상 조직 보유역량의 부분집합이 되고
-# missing이 구조적으로 항상 비었다 — 역량전이가능성이 모든 아이디어에서 항상
-# 0점으로 깔리던 원인이다(2026-08-09 확인). F1.py가 조직 프로필 파싱에서 이미
-# 같은 이유로 쓰고 있는 '표준역량 32개'(data/표준역량_정의.csv, F3-2가 실제로
-# 채점하는 축)로 넓혀서, 조직이 못 가진 역량도 요구역량으로 나올 수 있게 한다.
+# 요구역량 축 — 표준역량 32개
 # ─────────────────────────────────────────────────────────────
 CAPABILITY_CHOICES = load_f1().load_standard_capability_choices()  # [{"id","name","desc"}, ...] 32개
 if not CAPABILITY_CHOICES:
-    # data/표준역량_정의.csv를 못 찾았을 때의 안전망 — 조직 보유 11개로라도 동작.
-    # (이 경로면 required_capability_ids가 다시 조직 보유역량으로 좁아지고
-    #  역량전이가능성 0점 문제가 재발한다 — CAPABILITY_CHOICES가 비어 있다는
-    #  건 F1.load_standard_capability_choices()가 CSV를 못 찾았다는 뜻이니
-    #  data/표준역량_정의.csv 위치부터 확인할 것.)
     CAPABILITY_CHOICES = [
         {"id": c["capability_id"], "name": c["name"], "desc": ""}
         for c in load_f1().CAPABILITY_DEFINITIONS
@@ -143,7 +109,6 @@ def build_org_profile_text(org_profile: dict) -> str:
         for c in org_profile.get("capabilities", [])
     ]
     ctx = org_profile.get("org_context", {}) or {}
-    # F1이 실제로 채우는 키만 노출한다(없는 키를 []로 보여주면 LLM이 "정보 없음"으로 오해).
     ctx_items = [
         ("도메인 전문가 보유", ctx.get("has_domain_expert")),
         ("추론속도 기준 충족", ctx.get("inference_speed_ok")),
