@@ -1,15 +1,11 @@
-# ── 비밀키 — 절대 커밋하지 않는다 ──────────────────────────
 .env
 .env.local
 .streamlit/secrets.toml
 
-# ── 🔒 조직 실데이터 — 사내 자료라 공개 저장소에 올리면 안 된다 ──
-#    (직원 실명·특허 목록이 들어 있다. 없어도 앱은 정상 실행된다.)
 samples/
 core/upload/organization_profile.json
 outputs/
 
-# ── 파이썬 ────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.egg-info/
@@ -17,23 +13,19 @@ __pycache__/
 venv/
 env/
 
-# ── 테스트 · 도구 캐시 ─────────────────────────────────────
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
 htmlcov/
 
-# ── 파트별 단독 실행 산출물 (python F3-2.py 등이 실행 폴더에 떨군다) ──
 f3_2_scores.csv
 f3_4_scores.csv
 
-# ── 로컬 개발 도구 ────────────────────────────────────────
 .claude/
 .vscode/
 .idea/
 
-# ── OS ────────────────────────────────────────────────────
 .DS_Store
 Thumbs.db
 desktop.ini
