@@ -1,11 +1,3 @@
-"""F5-1·2·3: 역량 갭 진단, 보완전략, 실행 로드맵.
-
-이 모듈은 점수·평가항목·세부항목·데이터 상태를 LLM이 만들지 않게 설계한다.
-파이썬이 앞 단계의 확정 데이터를 고정하고, LLM은 각 고정 슬롯의 분석 문장만
-작성한다. 따라서 한 필드의 표현 문제 때문에 전체 리포트를 규칙 문장으로
-교체하지 않는다.
-"""
-
 from __future__ import annotations
 
 import copy
@@ -23,7 +15,7 @@ DIAGNOSIS_MODE_RECOMMENDATION = "capability_recommendation"
 DIAGNOSIS_MODE_IDEA_FIT = "idea_fit"
 SCORE_SCHEMA_RECOMMENDATION_VERSION = "score_recommendation_8criteria_v1"
 SCORE_SCHEMA_IDEA_FIT_VERSION = "score_idea_fit_org55_llm45_v1"
-# 기존 연동 코드가 참조할 수 있어 추천형 스키마의 호환 별칭으로 유지한다.
+
 SCORE_SCHEMA_8_VERSION = SCORE_SCHEMA_RECOMMENDATION_VERSION
 DEFAULT_MODEL = "gpt-5.6-luna"
 MAX_OUTPUT_TOKENS = 64_000
@@ -56,12 +48,8 @@ ROADMAP_CRITERION_MAX_CHARS = 160
 ROADMAP_MAX_ACTIONS = 3
 ROADMAP_MAX_CRITERIA = 3
 
-# ── 대시보드 전용 짧은 버전(*_brief) ────────────────────────────────
-# 화면 카드에서는 한 항목이 800자를 넘으면 읽히지 않아 스크롤만 길어졌다.
-# 그렇다고 원문을 잘라 쓰면 문장 중간에서 끊긴다. 그래서 같은 LLM 호출에서
-# '짧은 버전'을 함께 받아 화면에만 쓴다(추가 API 호출 없음).
-# ⚠️ PDF(export_gap_report_pdf)는 원문 필드를 그대로 읽는다 — 여기 값을 바꿔도
-#    내보내는 보고서 내용은 달라지지 않는다.
+# ── 대시보드 전용 짧은 버전────────────────────────────────
+
 CATEGORY_SUMMARY_BRIEF_MAX_CHARS = 200
 SUBITEM_ASSESSMENT_BRIEF_MAX_CHARS = 180
 SUBITEM_IMPROVEMENT_BRIEF_MAX_CHARS = 300
@@ -209,13 +197,7 @@ def generate_gap_report(
     model: str | None = None,
     **_legacy_options: Any,
 ) -> dict[str, Any]:
-    """F5-1·2·3을 한 번의 LLM 호출로 생성한다.
-
-    기존 팀 연결부의 ``generate_gap_report(gap_data, reference_sources)`` 계약은
-    유지한다. 점수·만점 여부·출처 표시는 파이썬이 담당하고, LLM은 보완이
-    필요한 항목의 분석 문장만 작성한다. 별도의 의미 검증이나 재호출은 하지 않는다.
-    """
-
+    
     normalized = _normalize_gap_data(gap_data)
     sources = _build_sources(
         reference_sources or [],
@@ -274,11 +256,6 @@ def build_dashboard_view(report: Mapping[str, Any]) -> dict[str, Any]:
 def export_gap_report_pdf(
     report: Mapping[str, Any], *, subject_name: str | None = None
 ) -> bytes:
-    """기존 분석 결과를 인쇄용 한글 PDF 보고서로 재배치한다.
-
-    사이트 UI, 점수, 분석 문장은 바꾸지 않는다. 다운로드 과정에서도 LLM이나
-    외부 API를 다시 호출하지 않는다.
-    """
 
     if not isinstance(report, Mapping):
         raise F5InputError("내보낼 report는 딕셔너리여야 합니다.")
