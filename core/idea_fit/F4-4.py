@@ -1,36 +1,3 @@
-"""
-F4-4. 아이디어 입력 전용 100점 채점 — 7A단계 (담당: 김민주)
-
-7B(DB 매칭 후보)는 F3-2(조직계열) + F2-5(시장계열)로 채점하는데, F2-5는 DB 행의
-실측 시장규모·진입장벽 텍스트를 파싱해서 쓴다. 7A(사용자가 직접 입력한 아이디어,
-6C의 F4-3 신규 제안 포함)는 DB에 없는 아이디어라 그 실측 데이터가 없다. 그래서 7A는:
-
-  - 조직계열: F3-2.calculate_org_series_scores()를 그대로 재사용한다
-    (점수 공식·배점 변경 없음 — F3-2가 바뀌면 7A도 자동으로 같이 바뀐다).
-    예외 하나: 역량전이가능성이 미평가(None) 또는 0점(=요구역량을 조직이
-    32개 표준역량 축 안에서 100% 보유해 전이할 대상이 없음)이면서, F4-1이
-    32개에도 없어서 자유서술로 낸 unmatched_capabilities가 있으면, 항목당
-    고정 2점(최대 3개=6점)을 역량전이가능성에 가점한다(2026-08-09 추가).
-    LLM은 "목록 밖 역량이 몇 개 있는지"만 판단하고 "몇 점인지"는 고정 상수가
-    정한다 — required_caps엔 안 섞어서 조직역량적합도·부족역량수준·실행가능성은
-    영향받지 않는다. 적용 여부는 결과의 transfer_bonus 키로 노출한다.
-  - 시장계열: LLM이 "시장규모(억달러)·진입장벽(5단계)"만 추정하고, 그 추정값을
-    F2-5의 실제 점수 계산 함수(calculate_market_series_scores)에 그대로 넣어
-    점수를 낸다. LLM은 숫자를 "추정"만 하고 "채점"은 F2-5가 한다 — 그래야 7A와
-    7B가 같은 배점 공식을 공유하고, LLM이 점수를 직접 지어내는 것보다 일관적이다.
-    항목 개수·이름·배점은 이 파일에 하드코딩하지 않는다(f3_2.CAPS/f2_5.CAPS를
-    그대로 읽음) — F2-5가 항목을 추가·삭제해도(예: 경쟁강도 부활, 2026-08-06)
-    이 파일은 손 안 대도 따라간다.
-
-AI 추정치라는 걸 화면에서 명확히 표시해야 한다(DB 실측과 혼동 방지) —
-market_estimate.is_estimated=True와 rationale을 그대로 노출할 것.
-
-에러 처리: OPENAI_API_KEY가 없거나 호출이 실패하면 시장계열 항목을 전부 None으로
-둔다(0점이 아니라 "미평가" — F2-5/F3-2와 동일 규약). 조직계열 점수만으로도 화면은 뜬다.
-
-calculate_idea_score(required_caps, idea_context, org_context=None, return_detail=False) -> dict
-"""
-
 import importlib.util
 import os
 from pathlib import Path
@@ -47,7 +14,6 @@ except ImportError:
 
 BASE = Path(__file__).parent
 
-# F3-2·F2-5는 core/scoring/에 있다. F4-4는 core/idea_fit/에 있어서 폴더가 다르다.
 SEARCH_DIRS = [
     Path(os.environ["SUNIC_CODE_DIR"]) if os.environ.get("SUNIC_CODE_DIR") else None,
     BASE,
@@ -57,7 +23,6 @@ SEARCH_DIRS = [
 
 
 def _load(name: str, filename: str):
-    """F3-4.py와 같은 로더 패턴 — core.paths가 있으면 그걸로 캐시 공유, 없으면 직접 탐색."""
     try:
         from core.paths import load_module
         return load_module(name, filename)
@@ -83,7 +48,7 @@ f3_2 = _load("f3_2", "F3-2.py")
 
 
 # ════════════════════════════════════════════════════════════
-# 1. 배점 — F3-2/F2-5 값을 그대로 합쳐서 만든다(하드코딩 금지, F3-4와 동일 원칙)
+# 1. 배점 
 # ════════════════════════════════════════════════════════════
 CAPS = {**f3_2.CAPS, **f2_5.CAPS}
 TOTAL_CAP = sum(CAPS.values())
@@ -92,7 +57,7 @@ OPENAI_MODEL = os.environ.get("F4_4_OPENAI_MODEL", "gpt-5.6-terra")
 
 
 # ════════════════════════════════════════════════════════════
-# 2. LLM 시장 추정 (숫자만 추정, 채점은 F2-5가 한다)
+# 2. LLM 시장 추정 
 # ════════════════════════════════════════════════════════════
 class MarketEstimate(BaseModel):
     market_size_usd: float = Field(
@@ -149,12 +114,7 @@ def _estimate_market_inputs(idea_context: dict) -> MarketEstimate:
 
 
 def _score_market_series(idea_context: dict, org_context: dict) -> tuple:
-    """(시장계열 항목 점수 dict, market_estimate 정보 dict)
-
-    실패해도 예외를 던지지 않는다 — 조직계열 점수만으로도 화면이 떠야 한다.
-    항목 이름·개수를 하드코딩하지 않고 f2_5.CAPS에서 그대로 가져온다 —
-    F2-5가 항목을 추가·삭제해도(예: 경쟁강도 부활) 이 파일을 안 고쳐도 따라간다.
-    """
+    
     none_scores = {k: None for k in f2_5.CAPS}
     try:
         estimate = _estimate_market_inputs(idea_context)
@@ -174,22 +134,9 @@ def _score_market_series(idea_context: dict, org_context: dict) -> tuple:
 
 # ════════════════════════════════════════════════════════════
 # 3. 목록 밖 역량 보너스 — 역량전이가능성
-#
-# 요구역량을 조직이 32개 표준역량 축 안에서 100% 보유(missing=[])하면 전이할
-# 부족역량 자체가 없어서 역량전이가능성이 미평가(None)가 된다 — F3-2의
-# score_generic_transfer()/score_input_type_transfer()가 `if not missing: return None`.
-# (0점만 확인하면 이 경우가 통째로 빠져 보너스가 안 붙었다 — 2026-08-10 수정)
-# 근데 F4-1이 "32개에도 없어서" 자유서술로 낸 unmatched_capabilities는 정의상
-# 조직이 못 가진 게 확실한 역량이라, 이것도 부족역량의 일종으로 볼 수 있다.
-#
-# 다만 required_caps에 섞어 넣진 않는다 — 섞으면 조직역량적합도·부족역량수준·
-# 실행가능성까지 같은 리스트를 나눠 쓰므로 같이 오염된다(2026-08-09 논의).
-# 대신 역량전이가능성에만 고정 배점으로 소액 가점한다. LLM은 "몇 개 있는지"만
-# 판단하고 "몇 점인지"는 절대 안 정한다(항목당 고정 UNMATCHED_BONUS_PER_POINT) —
-# F4-4 전체의 "LLM은 추정, 점수는 공식" 원칙을 여기서도 유지한다.
 # ════════════════════════════════════════════════════════════
 UNMATCHED_BONUS_PER_ITEM = 2      # 항목당 고정 점수 (LLM이 정하지 않음)
-UNMATCHED_BONUS_MAX_ITEMS = 3     # 최대 반영 개수 (F4-1의 MAX_UNMATCHED_CAPABILITIES와 별개 캡)
+UNMATCHED_BONUS_MAX_ITEMS = 3     # 최대 반영 개수
 TRANSFER_CATEGORY = "역량전이가능성"
 TRANSFER_BONUS_SUBITEM = "A입력유형전이"
 
@@ -197,13 +144,6 @@ TRANSFER_BONUS_SUBITEM = "A입력유형전이"
 def _apply_unmatched_transfer_bonus(
     org_scores: dict, org_detail: dict, unmatched_capabilities: list | None
 ) -> dict:
-    """표준 목록 밖 역량을 제한적으로 반영하고 적용 근거를 구조화해 반환한다.
-
-    F3-2는 미보유 표준역량이 없으면 역량전이가능성을 0이 아니라 None으로 둔다.
-    전달본은 정확히 0인 경우만 확인해 설명과 달리 보너스가 빠질 수 있었으므로
-    None과 0을 모두 대상에 포함한다. 상세점수 합과 항목점수가 어긋나지 않도록
-    보너스는 A입력유형전이 슬롯에 별도 출처와 함께 기록한다.
-    """
     items = [str(item).strip() for item in (unmatched_capabilities or []) if str(item).strip()]
     base_score = org_scores.get(TRANSFER_CATEGORY)
     can_apply = base_score is None or float(base_score) == 0.0
@@ -230,22 +170,7 @@ def _apply_unmatched_transfer_bonus(
 # ════════════════════════════════════════════════════════════
 def calculate_idea_score(required_caps, idea_context: dict, org_context: dict = None,
                          return_detail: bool = False, unmatched_capabilities: list = None) -> dict:
-    """
-    Args:
-        required_caps: 표준역량ID 리스트 (F4-1 요구역량을 표준역량 축으로 직접 낸 것)
-        idea_context:  {"industry","problem","market","customer"} — LLM 시장 추정용 원문
-        org_context:   F2-5가 쓰는 조직 플래그(has_commercialization_experience 등).
-                        조직계열 보유수준은 F3-2.set_org_capabilities()로 이미 주입돼 있어야 한다.
-        return_detail: True면 조직계열 세부 항목(F3-2 detail)까지 반환
-        unmatched_capabilities: F4-1이 32개 표준역량 축에서 못 찾은 요구역량(자유서술).
-                        역량전이가능성이 0점이거나 미평가(None)일 때만, 항목당 고정
-                        점수로 소액 가점한다.
-
-    Returns:
-        {"scores": {8개 항목: float|None}, "total_score": float, "raw_score": float,
-         "denominator": int, "market_estimate": {...} | None,
-         "transfer_bonus": {...}, "detail": {...}(옵션)}
-    """
+    
     org_context = org_context or {}
 
     org_scores, org_detail = f3_2.calculate_org_series_scores(
