@@ -1,34 +1,3 @@
-"""
-F4-2. LLM 매칭 판단 (6A/6B단계, 담당: 김민주)
-
-조직 역량 프로필(F1)과 이미 점수화된 후보 목록(F3-4)을 받아, 단순 total_score 순이
-아니라 "기술 전이 가능성"까지 반영해 후보를 재정렬하고, 근거(evidence_id)를 인용한
-추천 이유를 생성한다.
-
-※ DB 밖 신규 후보 제안(F4-3)은 이 파일에서 분리해 F4-3.py로 옮겼다.
-   두 기능을 같이 쓰려면 main.py에서 순서대로 호출한다:
-       ranked = llm_match_judgment(org_profile, candidates)
-       new    = propose_new_candidates(org_profile, candidates)   # F4-3
-   분리 이유: (1) 재정렬은 후보가 있을 때 항상 쓰지만 신규 제안은 선택 기능이라
-   호출 시점·비용이 다르고, (2) 한 프롬프트에서 둘을 같이 시키면 신규 제안이
-   기존 후보 순위에 섞여 들어가 검증이 복잡해진다.
-
-환각 방어(이중 방어)
---------------------
-1. 스키마 단계: 응답 형식을 pydantic으로 강제.
-2. 사후 검증 단계:
-   - cited_evidence_ids는 org_profile에 실제 있는 것만 통과
-   - id는 "실제로 LLM에게 보여준 후보"에 있는 것만 인정
-     (안 보여준 후보를 아는 척하면 오히려 더 의심스러운 응답이므로 거부)
-   - 중복 id는 먼저 나온 것만 유지
-   - 응답에서 빠진 후보는 원 순서 그대로 뒤에 자동 보충 (후보가 조용히 사라지는 사고 방지)
-
-에러 처리: OPENAI_API_KEY가 없거나 호출이 실패하면 F3 점수 순서를 그대로 반환한다
-(used_llm=False, error에 사유). 대시보드가 죽지 않게 하기 위함.
-
-llm_match_judgment(org_profile, candidates) -> JSON
-"""
-
 import os
 
 from pydantic import BaseModel, Field
