@@ -74,7 +74,7 @@ def _download_filename_part(value: object, fallback: str = "gap_report") -> str:
 
 f2_5 = load_module("f2_5", "F2-5.py")
 profile_schema = load_module("profile_schema", "profile_schema.py")
-.
+
 f3_2 = try_load_module("f3_2", "F3-2.py")   # 조직계열 55점
 f3_3 = try_load_module("f3_3", "F3-3.py")   # 실행 가능성 필터 
 f3_4 = try_load_module("f3_4", "F3-4.py")   # 8개 항목 통합 100점
