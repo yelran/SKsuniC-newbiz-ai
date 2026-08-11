@@ -1,21 +1,3 @@
-"""
-F2-2. 신사업 후보 검색 (LLM / OpenAI API)
-=========================================
-산출물  : retrieve_business_candidates(query, top_k)
-          → JSON(idea_id, matched_capabilities, source_ids)
-
-■ 방식
-  신사업 DB 50건 전체를 프롬프트에 넣고, LLM이 쿼리와 관련성 높은 Top-K를
-  직접 골라 순위를 매긴다. DB가 50건(약 6~7K 토큰)이라 검색 없이 통째로
-  넣을 수 있어서, retrieval이 아니라 ranking 문제로 푼다.
-
-  · idea_id를 Structured Output의 enum으로 제약해 DB에 없는 ID 생성을 차단
-  · temperature=0 + seed 고정을 시도해 재현성을 확보 (모델이 거부하면 자동으로 생략)
-  · system_fingerprint·cached_tokens를 함께 반환
-
-
-"""
-
 import json
 import os
 import re
@@ -26,14 +8,9 @@ import pandas as pd
 BASE = Path(__file__).parent
 
 # ── 설정 ────────────────────────────────────────────────────────────
-# 모델 라인업은 수시로 바뀐다. 404가 나면 OpenAI 대시보드에서 사용 가능한
-# 모델명을 확인해 바꿀 것. 환경변수 OPENAI_MODEL로도 지정 가능.
 MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6-luna")
 SEED = 42                 # 재현성 측정용
 TOP_K_DEFAULT = 5
-
-# 후처리에서 중복·환각 태그를 걸러내면 개수가 줄 수 있으므로 여유분을 더 요청한다.
-# 완전한 보장은 아니지만(재호출 없이는 불가) 부족할 확률을 크게 낮춘다.
 TOP_K_MARGIN = 2
 
 
@@ -60,12 +37,6 @@ def load_business_db() -> pd.DataFrame:
         df = pd.read_csv(path) if path.suffix == ".csv" else pd.read_excel(path)
         for c in ("아이디어명", "필요역량태그", "설명"):
             df[c] = df[c].fillna("").astype(str)
-        # 프롬프트에 들어가는 DB 순서를 아이디어ID로 고정한다.
-        # 재현성 측정(2026-08-04)에서 DB 순서만 바꿨을 때 '영상진단' 쿼리의
-        # 1위가 세 번 다 달라졌다(1위일치율 0.33). 프롬프트 앞쪽에 놓인 항목이
-        # 상위로 올라오는 위치 편향 신호도 관측됐다.
-        # 엑셀 행 순서에 의존하면 DB에 항목을 추가·삭제할 때마다 결과가 바뀌므로
-        # 명시적으로 정렬해 둔다. → f2_2_stability.py 축② 참고
         df = df.sort_values("아이디어ID", kind="stable").reset_index(drop=True)
         _cache["db"], _cache["path"] = df, path
     return _cache["db"]
@@ -75,14 +46,6 @@ def load_business_db() -> pd.DataFrame:
 # 2. 프롬프트 · 스키마
 # ════════════════════════════════════════════════════════════
 
-# ⚠️ 예시를 고칠 때 주의 — 평가 오염 방지
-#   여기 들어가는 예시는 테스트 쿼리(영상진단 / 화상 판독 / 심장 크기 계측 /
-#   결석 검출 / 음성 스트레스 판별 / 차량 경로 안내 / 산업용 X-ray… / 설비 소리…)와
-#   그 정답 아이디어를 절대 언급하지 말 것.
-#   이전 버전은 예시에 "심장 크기 계측→정량계측", "결석 검출↔금속이물 검출"을 적어놨는데,
-#   그게 그대로 테스트 쿼리여서 모델이 프롬프트 문장을 되돌려주는 일이 발생했다.
-#   그 결과로는 모델의 실제 판단력을 측정할 수 없다.
-#   → 예시는 신사업 DB에 없는 도메인에서만 가져온다.
 SYSTEM_PROMPT = """당신은 조직이 보유한 기술 역량과 신사업 후보를 연결하는
 후보 검색·랭킹 엔진이다.
 
@@ -231,41 +194,13 @@ def _explain(e: Exception) -> str:
 
 # ════════════════════════════════════════════════════════════
 # 4. 후처리 검증
-#    프롬프트에 "하지 마라"고 적는 것과 실제로 안 하는 것은 다르다.
-#    Structured Output의 strict 모드도 uniqueItems·minItems를 지원하지 않으므로
-#    아래 항목은 코드에서 검증해야 한다.
-#
-#    실제로 관측된 위반 (2026-08-04, gpt-4o-mini):
-#      idea_037의 matched_capabilities로 "생체신호 바이오마커 분석"을 반환했는데
-#      DB 실제 표기는 "바이오마커(생체신호) 분석"이었다. 모델이 말을 바꿨다.
-#      이 값을 그대로 F3-1(집합 연산)에 넘기면 매칭이 깨진다.
 # ════════════════════════════════════════════════════════════
 
 def _split_caps(tag_text: str) -> list:
-    """필요역량태그를 개별 역량 리스트로 분리한다. 구분자는 쉼표뿐이다.
-
-    ⚠️ '/'로 자르면 안 된다 (2026-08-04 실측):
-       DB 50건 중 7건이 역량명 안에 '/'를 쓴다 —
-       'X-ray/CT', '산업 X-ray/CT', '음향/오디오', '마이크로바이옴/오믹스 분석',
-       '바이오마커/유전자 분석', '수의/축산 도메인 지식'.
-       '/'로 쪼개면 'X-ray/CT'가 'X-ray'+'CT'가 되어, 모델이 DB 표기 그대로
-       'X-ray/CT'를 반환했을 때 "DB에 없는 값"으로 오판해 삭제해버린다.
-       환각을 잡으려는 검증이 정상 출력을 지우는 오탈락이 된다.
-    """
     return [t.strip() for t in str(tag_text).split(",") if t.strip()]
 
 
 def postprocess(raw: list, db: pd.DataFrame, top_k: int) -> tuple:
-    """모델 출력을 검증·보정한다. 반환: (결과 리스트, 보정 내역 리스트)
-
-    검증 항목
-      1. DB에 없는 idea_id 제거          (스키마 enum이 막지만 이중 방어)
-      2. 중복 idea_id 제거               (strict 모드가 못 막음)
-      3. matched_capabilities를 DB 실제 태그와 대조 → 없는 값 제거
-      4. relevance를 0~100으로 클램프
-      5. relevance 내림차순 재정렬
-      6. 개수가 top_k에 못 미치면 경고 (임의로 채우지는 않는다)
-    """
     issues = []
     valid_ids = set(db["아이디어ID"])
     name_of = dict(zip(db["아이디어ID"], db["아이디어명"]))
@@ -319,7 +254,7 @@ def postprocess(raw: list, db: pd.DataFrame, top_k: int) -> tuple:
             "reason": str(r.get("reason", "")).strip(),
         })
 
-    # 내림차순 재정렬 (모델이 순서를 어겼을 수 있음)
+    # 내림차순 재정렬 
     before = [x["idea_id"] for x in results]
     results.sort(key=lambda x: x["relevance"], reverse=True)
     if [x["idea_id"] for x in results] != before:
@@ -333,40 +268,12 @@ def postprocess(raw: list, db: pd.DataFrame, top_k: int) -> tuple:
 
 
 # ════════════════════════════════════════════════════════════
-# 5. F2-2 산출물
+# 5. 산출물
 # ════════════════════════════════════════════════════════════
 
 def retrieve_business_candidates(query: str, top_k: int = TOP_K_DEFAULT,
                                  return_meta: bool = False):
-    """조직 역량 표현(query)에 맞는 신사업 후보 Top-K를 LLM으로 검색한다.
-
-    Args:
-        query       : 조직 역량 표현 또는 아이디어 설명 (예: "영상진단")
-        top_k       : 반환 개수
-        return_meta : True면 (results, meta) 튜플로 반환. meta에는 모델명,
-                      system_fingerprint, 토큰 사용량이 담긴다(재현성 측정용).
-
-    Returns:
-        list[dict] — 관련성 높은 순. 각 항목의 키:
-            idea_id              : 신사업 DB 고유 ID  ★공식 계약
-            matched_capabilities : 쿼리와 연결되는 필요역량 리스트  ★공식 계약
-            source_ids           : 근거가 된 신사업 DB 레코드 ID 리스트  ★공식 계약
-                                   (전체 DB를 프롬프트에 넣는 방식이라, 한 후보의
-                                    근거 레코드는 그 후보 자신의 행뿐이다. 따라서
-                                    [idea_id]가 맞다. 나중에 검색 단계가 여러 행을
-                                    참조하게 바뀌면 여기에 여러 ID가 들어간다.)
-            idea_name            : 아이디어명 (확장)
-            source_url           : DB 출처링크 (확장 — F5-2 근거 인용용)
-            relevance            : 0~100 관련성 점수 (확장 — 7단계 랭킹용)
-            reason               : 판단 근거 한 문장 (확장 — 10단계 근거 서술용)
-
-        ★공식 계약 3개만 필요한 파트는 to_f2_2_output()으로 변환해서 받으면 된다.
-
-    Raises:
-        TypeError  : top_k가 정수가 아닐 때
-        ValueError : top_k가 1~DB건수 범위를 벗어날 때
-        RuntimeError: API 호출 실패 또는 모델이 요청을 거절했을 때
-    """
+   
     if not query or not query.strip():
         return ([], {}) if return_meta else []
 
@@ -380,7 +287,7 @@ def retrieve_business_candidates(query: str, top_k: int = TOP_K_DEFAULT,
 
     client = _get_client()
 
-    # 후처리에서 걸러질 수 있으니 여유분을 더 요청한다 (DB 건수를 넘지 않게).
+    # 후처리에서 걸러질 수 있으니 여유분을 더 요청한다 
     ask_k = min(top_k + TOP_K_MARGIN, len(db))
 
     payload = dict(
@@ -398,8 +305,7 @@ def retrieve_business_candidates(query: str, top_k: int = TOP_K_DEFAULT,
         },
     )
 
-    # temperature=0 + seed로 재현성을 확보한다.
-    # 일부 추론형 모델은 이 두 값을 거부(400)하므로 그때는 빼고 재시도한다.
+
     try:
         try:
             resp = client.chat.completions.create(temperature=0, seed=SEED, **payload)
@@ -418,15 +324,14 @@ def retrieve_business_candidates(query: str, top_k: int = TOP_K_DEFAULT,
     data = json.loads(msg.content)
     results, issues = postprocess(data.get("results", []), db, top_k)
     if issues:
-        print(f"  ⚠️ [F2-2 검증] 쿼리 '{query[:20]}' — 모델 출력에서 {len(issues)}건 보정:")
+        print(f"  [F2-2 검증] 쿼리 '{query[:20]}' — 모델 출력에서 {len(issues)}건 보정:")
         for it in issues:
             print(f"      · {it}")
 
     if not return_meta:
         return results
 
-    # 캐시된 입력 토큰 — DB 50건 블록(약 6.4K)이 매번 동일하므로 2회차부터 잡혀야 정상.
-    # 잡히면 그만큼 입력 비용이 할인된다. 0이면 캐싱이 안 걸리는 것.
+
     cached = 0
     details = getattr(resp.usage, "prompt_tokens_details", None)
     if details is not None:
@@ -443,13 +348,6 @@ def retrieve_business_candidates(query: str, top_k: int = TOP_K_DEFAULT,
 
 
 def to_f2_2_output(results: list) -> list:
-    """기능명세서상의 공식 F2-2 출력 계약만 남긴다.
-
-        JSON(idea_id, matched_capabilities, source_ids)
-
-    확장 필드(idea_name, source_url, relevance, reason)를 기대하지 않는 파트에
-    넘길 때 이걸 거쳐서 넘긴다. 확장 필드가 필요한 파트는 원본을 그대로 쓴다.
-    """
     return [
         {
             "idea_id": r["idea_id"],
