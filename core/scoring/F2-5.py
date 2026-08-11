@@ -1,41 +1,3 @@
-"""
-F2-5. 시장계열 점수 계산 (F2-3 판정 반영)
-==========================================
-
-■ F2-3에서 확정된 변경 4건
-  1. 경쟁강도 10점 삭제
-     실측 50건 중 48건이 8점(표준편차 0.59). 유일한 변별 2건 중 1건은
-     '국방부·국회도서관·KISTI'를 '·'로 잘라 3개로 센 파싱 오류였다.
-     빼도 순위 스피어만 0.9979 · Top-10 10/10 일치 → 이미 기여하지 않았다.
-     배점 10점은 조직계열로 이동(조직역량적합도 20→24, 전이 15→18, 부족 15→18).
-
-  2. 시장성 3구간 → 사분위 4구간
-     3구간은 대규모(15점) 그룹 안에서 원본이 204~2,610억달러(13배)까지 벌어졌다.
-     사분위로 바꾸면 표준편차 3.50→4.25, 최빈 48%→26%.
-
-  3. 사업성 입력을 파생점수 → 원시값
-     기존 score_business_viability(market_score, competition_score)는 '점수'를
-     입력으로 받아 시장성과 r=+0.988이 되었다. 원시 시장규모를 직접 받는다.
-
-  4. 진입장벽 G 네트워크 → F 사업화 역량 (설계문서와 배선 불일치 수정)
-     + 복합등급 파싱: '하~중'이 기본값 '중'(6점)으로 흘러가 idea_039가 4점 손실됐다.
-     + 상한 버그 제거: 기존 min(10, base+2)는 '하'(이미 10점)만 보너스를 못 받아
-       상수 보너스가 균등하지 않았다. 이제 DB 5점 + F 5점을 독립 합산한다.
-
-■ 미확인 처리
-  파싱이 안 되면 0점이 아니라 None을 반환한다. 0점을 주면 '자료가 없다'를
-  '나쁘다'로 바꿔 버린다. None인 항목은 분모에서 빼고 백분율로 환산한다
-  (sum_with_denominator 참고). LLM 추천 후보는 시장규모가 대부분 '미확인'이다.
-
-■ 알려진 한계 (F2-3에서 확인, 배점 유지 결정)
-  사업성의 DB 시장규모 6점은 시장성 15점과 같은 컬럼을 쓴다 → r = 1.0.
-  대안으로 CAGR(성장률)을 검토했으나 50건 중 17건(34%)만 계산 가능해
-  E 추론 속도를 제외한 것과 같은 이유로 채택하지 않았다.
-  따라서 사업성 10점의 독립 정보는 사실상 없다(6점은 시장성 복사, 4점은 상수).
-
-실행: python F2-5.py
-"""
-
 import re
 import sys
 from pathlib import Path
@@ -45,21 +7,21 @@ import pandas as pd
 BASE = Path(__file__).parent
 
 # ════════════════════════════════════════════════════════════
-# 배점 (F2-3 확정)
+# 배점 
 # ════════════════════════════════════════════════════════════
 CAPS = {"시장성": 15, "경쟁강도": 10, "진입장벽": 10, "사업성": 10}
 
-# 시장규모 사분위 경계 (억달러) — 신사업DB 50건 실측값
+# 시장규모 사분위 경계 (억달러) 
 MARKET_Q = (35.5, 119.9, 290.2)
 MARKET_BANDS = (4, 8, 12, 15)          # 시장성 15점
 VIABILITY_BANDS = (1.5, 3.0, 4.5, 6.0)  # 사업성 중 시장규모 6점
 
-# 진입장벽 (5단계 정밀화) — DB 5점 (장벽이 낮을수록 유리)
+# 진입장벽 (5단계 정밀화)
 ENTRY_BARRIER_TABLE = {"하": 5, "중하": 4, "중": 3, "중상": 2, "상": 1}
 ENTRY_BARRIER_F = 5      # F 사업화 역량 보유 시
 VIABILITY_F = 4          # 사업성 중 F 사업화 역량
 
-# 경쟁강도 매트릭스 테이블 (시장크기 대/중/소 × 진입장벽 5단계)
+# 경쟁강도 매트릭스 테이블
 COMPETITION_MATRIX = {
     ("대", "상"): 10.0, ("대", "중상"): 9.0, ("대", "중"): 6.0, ("대", "중하"): 4.0, ("대", "하"): 2.0,
     ("중", "상"): 8.0, ("중", "중상"): 7.0, ("중", "중"): 5.0, ("중", "중하"): 3.0, ("중", "하"): 1.0,
@@ -127,17 +89,7 @@ def score_market_size(market_size_usd: float) -> float:
 
 def score_entry_barrier(barrier_level: str,
                         has_commercialization_experience: bool = False) -> float:
-    """진입장벽 — 최대 10점 = DB 진입장벽수준 5점 + F 사업화 역량 5점.
-
-    설계문서대로 F(사업화·서비스 운영 역량)를 쓴다. 기존 코드는 설계에 없는
-    G(네트워크)를 썼고, min(10, base+2)로 상한에 걸려 '하'인 후보만 보너스를
-    못 받는 비균등 가산이었다. 이제 두 축을 독립 합산한다.
-
-    등급을 못 읽으면 항목 전체를 None으로 둔다 (F 몫도 버린다).
-      ⚠️ F 몫만 남기면 분모는 10점인데 최대 5점밖에 못 받아 그 후보만 불리해진다.
-         F는 조직이 하나라 모든 후보에 동일하게 붙는 상수이므로, 버려도 순위에
-         영향이 없다. 분모를 함께 빼는 쪽이 공정하다.
-    """
+    
     db_part = ENTRY_BARRIER_TABLE.get(barrier_level)
     if db_part is None:
         return None
@@ -147,15 +99,7 @@ def score_entry_barrier(barrier_level: str,
 
 def score_business_viability(market_size_usd: float,
                              has_commercialization_experience: bool = False) -> float:
-    """사업성 — 최대 10점 = DB 시장규모 6점 + F 사업화 역량 4점.
-
-    ⚠️ 변경: 기존 시그니처는 (market_score, competition_score)로 '파생 점수'를
-       받아 시장성과 r=+0.988이 되었다. 이제 원시 시장규모를 받는다.
-       단 같은 컬럼을 쓰므로 시장성과 r=1.0인 것은 남아 있다(F2-3 확인, 배점 유지).
-
-    시장규모를 못 읽으면 항목 전체를 None으로 둔다 (F 몫도 버린다) —
-    score_entry_barrier와 같은 이유다.
-    """
+    
     if market_size_usd is None:
         return None
     f_part = VIABILITY_F if has_commercialization_experience else 0
@@ -191,12 +135,7 @@ def calculate_market_series_scores(market_data: dict, org_context: dict = None) 
 
 
 def sum_with_denominator(scores: dict, caps: dict = None) -> tuple:
-    """None인 항목을 분모에서 빼고 (획득점수, 배점합)을 돌려준다.
-
-    미확인 항목에 0점을 주면 '자료가 없다'가 '나쁘다'로 바뀐다.
-    LLM 추천 후보처럼 시장 데이터가 없는 후보를 DB 후보와 같은 척도로
-    비교하려면 분모를 맞춰야 한다.
-    """
+    
     caps = caps or CAPS
     got = sum(v for v in scores.values() if v is not None)
     den = sum(caps[k] for k, v in scores.items() if v is not None and k in caps)
@@ -214,9 +153,9 @@ def check_배점초과(all_scores: list):
         over = [s for s in all_scores if s[label] is not None and s[label] > cap]
         if over:
             ok = False
-            print(f"  ❌ {label}: {len(over)}건이 {cap}점 초과 — "
+            print(f"   {label}: {len(over)}건이 {cap}점 초과 — "
                   f"{[s['아이디어ID'] for s in over]}")
-    print("  ✅ 전항목 배점 이내" if ok else "  → 로직 재확인 필요")
+    print("  전항목 배점 이내" if ok else "  → 로직 재확인 필요")
 
 
 def check_단조성():
@@ -230,7 +169,7 @@ def check_단조성():
         print(f"  {usd:>5}억달러 → 시장성 {s:>2}점 · 사업성(F없음) "
               f"{score_business_viability(usd)}점")
         prev = s
-    print("  ✅ 단조 증가" if ok else "  ❌ 역전 구간 있음")
+    print("  단조 증가" if ok else "  역전 구간 있음")
 
     print("\n  진입장벽 (F 사업화 역량 없음 / 있음)")
     for lv in ("상", "중", "하"):
@@ -248,10 +187,10 @@ def check_복합등급(df: pd.DataFrame):
         lv = parse_entry_barrier_level(r["진입장벽수준"])
         if lv is None:
             n_fail += 1
-            print(f"  ❌ {r['아이디어ID']}: '{head}' 파싱 실패 → None")
+            print(f"   {r['아이디어ID']}: '{head}' 파싱 실패 → None")
         elif head not in ("상", "중", "하"):
             n_compound += 1
-            print(f"  ✅ {r['아이디어ID']}: 복합등급 '{head}' → '{lv}' "
+            print(f"   {r['아이디어ID']}: 복합등급 '{head}' → '{lv}' "
                   f"({ENTRY_BARRIER_TABLE[lv]}점)")
     print(f"  복합등급 {n_compound}건 처리 · 파싱 실패 {n_fail}건")
 
@@ -268,9 +207,9 @@ def check_quartile_drift(df: pd.DataFrame):
     print(f"  현재 DB  : {q}  ({len(vals)}/{len(df)}건 파싱)")
     drift = [abs(a - b) / b for a, b in zip(q, MARKET_Q)]
     if max(drift) > 0.10:
-        print(f"  ⚠️ 최대 {max(drift):.0%} 어긋남 — MARKET_Q를 갱신할 것")
+        print(f"   최대 {max(drift):.0%} 어긋남 — MARKET_Q를 갱신할 것")
     else:
-        print(f"  ✅ 최대 {max(drift):.0%} 차이 — 갱신 불필요")
+        print(f"   최대 {max(drift):.0%} 차이 — 갱신 불필요")
 
 
 def check_변별력(all_scores: list):
@@ -322,8 +261,7 @@ def run_all(org_context: dict = None) -> list:
 
 
 if __name__ == "__main__":
-    # cp949 환경이나 파일 리다이렉트에서 '—' 같은 문자가 UnicodeEncodeError를
-    # 내지 않게 출력 인코딩을 UTF-8로 고정한다.
+   
     try:
         sys.stdout.reconfigure(encoding="utf-8")
     except AttributeError:
@@ -331,8 +269,7 @@ if __name__ == "__main__":
 
     df = pd.read_excel(next(BASE.glob("*DB*.xlsx")))
 
-    # F1 조직 데이터가 확정되면 여기에 실제 값을 넣는다.
-    # 엑스칼리버 상용화 실적이 있으므로 True로 둔다 (조직개요: '국내 최초 상용화').
+    
     ORG = {"has_commercialization_experience": True}
 
     all_scores = run_all(ORG)
