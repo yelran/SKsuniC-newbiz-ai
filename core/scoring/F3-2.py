@@ -1,34 +1,3 @@
-"""
-F3-2. 조직계열 4개 항목 점수 계산 (확정 배점표 2026-08-06 기준)
-
-■ 배점 (합 55점 — 시장계열 45점과 합쳐 100점)
-  1. 조직 역량 적합도 20 = A입력유형적합 7 + A수행작업적합 6 + B특허분류매칭 4 + B로드맵연계 3
-  2. 역량 전이 가능성 15 = A범용역량전이 6 + A입력유형전이 6 + B유휴특허 3
-  3. 부족 역량 수준   15 = A미매칭역량 5 + B특허미커버 3 + C도메인인력부재 7
-  4. 실행 가능성       5 = C도메인전문성 5
-
-
-■ 데이터 축 변경 (중요)
-  이전: DB 태그 → alias_map → F1 capability 이름(11개)
-  현재: DB 태그 → 역량어휘_매핑.csv(177행) → 표준역량ID(32개) → 표준역량_정의.csv
-  이유: 확정 배점표의 세부항목이 표준역량_정의.csv의 컬럼과 1:1로 대응한다.
-        역량성격(입력유형/수행작업/도메인/기반) · 특허분류 · 특허건수 ·
-        로드맵연계 · 전담인력 · 전이출처 · 조직보유수준(★0~5)
-        F1 JSON에는 이 정보가 없어서 세부항목을 계산할 수 없다.
-
-■ 계산 원칙 3가지
-  ① 각 세부항목은 '요구역량 중 조직이 얼마나 커버하는가'를 0~1 비율로 구한 뒤 배점을 곱한다.
-  ② 유무(0/1)가 아니라 조직보유수준(★1~5)을 가중치로 쓴다. ★5 역량이 매칭되면 ★2보다 높다.
-  ③ 평가 대상이 하나도 없으면 0점이 아니라 None을 반환한다(F2-5와 동일 규약).
-     예) 입력유형 역량을 전혀 요구하지 않는 사업에 'A 입력유형 적합 8점'은 평가 대상이 아니다.
-     0점을 주면 '해당 없음'이 '나쁨'으로 바뀐다. None은 sum_with_denominator()가 분모에서 뺀다.
-
-■ 조정 포인트
-  ROADMAP_WEIGHT · LEVEL_MAX · SUB_CAPS 세 상수만 바꾸면 배점·가중치를 조절할 수 있다.
-
-실행: python F3-2.py
-"""
-
 import importlib.util
 import os
 from functools import lru_cache
@@ -39,7 +8,7 @@ import pandas as pd
 BASE = Path(__file__).parent
 
 # ════════════════════════════════════════════════════════════
-# 0. 데이터 파일 경로 — 통합 폴더(app/data)와 개발 폴더 양쪽을 찾는다
+# 0. 데이터 파일 경로 
 # ════════════════════════════════════════════════════════════
 DATA_DIRS = [
     Path(os.environ["SUNIC_DATA_DIR"]) if os.environ.get("SUNIC_DATA_DIR") else None,
@@ -64,7 +33,7 @@ def _find(filename: str) -> Path:
 
 
 # ════════════════════════════════════════════════════════════
-# 1. 배점 (확정 배점표)
+# 1. 배점 
 # ════════════════════════════════════════════════════════════
 CAPS = {"조직역량적합도": 20, "역량전이가능성": 15, "부족역량수준": 15, "실행가능성": 5}
 
@@ -77,7 +46,6 @@ SUB_CAPS = {
 
 LEVEL_MAX = 5  # 조직보유수준 만점 (★1~5)
 
-# 로드맵연계 등급 → 가중치. '미연계'는 0이지만 유휴특허 항목에서 따로 가점된다.
 ROADMAP_WEIGHT = {"핵심": 1.0, "확장": 0.7, "개발 단계": 0.5, "보조": 0.3, "미연계": 0.0}
 
 SYNTH_CAP_ID = "CAP_SYNTH"  # A 범용 역량 전이(증강·합성)의 기준 역량
@@ -122,31 +90,12 @@ def cap_names(cap_ids) -> list:
     return [cap_name(c) for c in (cap_ids or [])]
 
 
-# ── 업로드된 조직 프로필 (F1 standard_capability_levels) ────────────────
-# None이면 표준역량_정의.csv 값을 쓴다(단독 실행·데모용).
-#
-# ⚠️ 왜 필요한가
-#   CSV의 조직보유수준·특허건수·전담인력·로드맵연계는 특정 조직(샘플 데이터의 팀)을
-#   미리 적어둔 스냅샷이다. 그것만 읽으면 다른 조직이 자기 파일을 올려도 조직계열
-#   55점이 그대로 나온다. 업로드→파싱 결과가 점수에 반영되지 않으므로, 배포하면
-#   바로 드러나는 문제다.
-#   CSV에 남는 것은 조직과 무관한 정의뿐이다 — 표준역량명·역량성격·특허분류·전이출처.
+
 _ORG_CAPS = None
 
 
 def set_org_capabilities(caps: dict = None) -> None:
-    """업로드 프로필의 표준역량 사실로 CSV 값을 덮어쓴다.
-
-    Args:
-        caps: F1 standard_capability_levels —
-              {"CAP_VISION": {"level":5, "patent_count":6, "staff":[...],
-                              "roadmap":"핵심"}, ...}
-              보유수준만 있는 {"CAP_VISION": 5} 형태도 받는다.
-              None이면 CSV로 되돌린다.
-
-    ⚠️ caps가 주어지면 거기 없는 역량은 미보유(수준 0·특허 0·인력 없음)로 본다.
-       CSV 값으로 메우면 업로드한 조직이 남의 스냅샷을 물려받는다.
-    """
+   
     global _ORG_CAPS
     if caps is None:
         _ORG_CAPS = None
@@ -253,7 +202,7 @@ def parse_required_capabilities_detail(text) -> tuple:
 
 
 # ════════════════════════════════════════════════════════════
-# 4. 매칭 (F3-1 재사용)
+# 4. 매칭
 # ════════════════════════════════════════════════════════════
 def _load_f3_1():
     """F3-1을 불러온다.
@@ -284,8 +233,7 @@ match_capabilities = _load_f3_1().match_capabilities  # 로직 변경 없음
 
 
 # ════════════════════════════════════════════════════════════
-# 5. 세부항목 점수 — 모두 (요구역량 중 커버 비율) × 배점
-#    평가 대상이 없으면 None (분모에서 제외)
+# 5. 세부항목 점수
 # ════════════════════════════════════════════════════════════
 def _ratio_by_level(cap_ids: list) -> float:
     """보유수준 가중 커버 비율. Σ(level/5) / n"""
@@ -396,13 +344,7 @@ def score_unmatched_gap(required: list, missing: list) -> float:
 
 
 def score_patent_uncovered(required: list) -> float:
-    """B 특허 미커버 영역 4점 — 특허로 커버되는 비율(미커버가 적을수록 높다).
-
-    ⚠️ '조직역량적합도 > B 특허분류 매칭 5점'과 같은 컬럼을 쓴다. 배점표가 같은
-       데이터를 가점(적합도)과 감점(부족역량) 양쪽에 배치했기 때문이며, 두 항목은
-       상관이 1.0이 된다. 확정 배점표를 그대로 따른 결과이므로 유지하되,
-       변별력 관점에서는 F2-5의 '사업성 6점 = 시장성 복사'와 같은 성격이다.
-    """
+    
     if not required:
         return None
     covered = sum(1 for c in required if org_patent_count(c) > 0)
@@ -419,13 +361,7 @@ def score_domain_staff(required: list) -> float:
 
 @lru_cache(maxsize=1)
 def _org_domain_level() -> float:
-    """조직이 보유한 도메인 전문성의 '최고 수준'.
-
-    평균이 아니라 최댓값을 쓴다. 표준역량에는 조직과 무관한 도메인(농업·환경·식품)이
-    같이 들어 있어서 평균을 내면 수의 도메인 ★4가 1.0으로 희석된다
-    (2026-08-06 실측: 도메인 4개 중 CAP_DOM_VET만 ★4, 나머지 0 → 평균 1.0).
-    '도메인 전문가를 보유했는가'를 묻는 항목이므로 최고 수준이 맞다.
-    """
+    
     std = load_std_caps()
     # 역량성격(도메인/입력유형/…)은 분류 체계라 CSV가 맞지만, 보유수준은 조직마다
     # 다르므로 org_level()을 통과시켜 업로드 프로필이 있으면 그 값을 쓴다.
@@ -448,7 +384,7 @@ def score_domain_expertise(required: list) -> float:
 
 
 # ════════════════════════════════════════════════════════════
-# 6. 통합 — 4개 항목 (F3-4에서 그대로 사용)
+# 6. 통합 — 4개 항목 
 # ════════════════════════════════════════════════════════════
 def _agg(subs: dict):
     """세부항목 dict → 항목 점수. 전부 None이면 None(=평가 대상 없음)."""
@@ -550,7 +486,7 @@ def check_1_배점초과(rows: list):
         if over:
             ok = False
             print(f"  ❌ {label}: {len(over)}건이 {cap}점 초과 — {[r['아이디어ID'] for r in over][:5]}")
-    print("  ✅ 전항목 배점 이내" if ok else "  → 위 항목 로직 재확인 필요")
+    print("  전항목 배점 이내" if ok else "  → 위 항목 로직 재확인 필요")
 
 
 def check_2_세부합계(rows: list):
@@ -561,18 +497,18 @@ def check_2_세부합계(rows: list):
             ok = False
             print(f"  ❌ {item}: 세부 합 {sum(subs.values())} ≠ 배점 {CAPS[item]}")
     print(f"  전체 합계: {sum(CAPS.values())}점 (시장계열 45점과 합쳐 100점)")
-    print("  ✅ 세부항목 합 일치" if ok else "  → SUB_CAPS 재확인 필요")
+    print("  세부항목 합 일치" if ok else "  → SUB_CAPS 재확인 필요")
 
 
 def check_3_미매핑(rows: list):
     print("\n[체크 3] DB 태그 매핑 실패 — 자동")
     bad = [r for r in rows if r["미매핑태그"] > 0]
     if bad:
-        print(f"  ⚠️ {len(bad)}건에서 매핑 실패 태그 발견 — 역량어휘_매핑.csv 보강 필요")
+        print(f"  {len(bad)}건에서 매핑 실패 태그 발견 — 역량어휘_매핑.csv 보강 필요")
         for r in bad[:5]:
             print(f"    - {r['아이디어ID']} {r['아이디어명']}: {r['미매핑태그']}개")
     else:
-        print("  ✅ 50건 전부 매핑 성공")
+        print("  50건 전부 매핑 성공")
 
 
 def check_4_변별력(rows: list):
