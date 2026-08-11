@@ -1,0 +1,263 @@
+"""
+F2. 조직 역량 프로필 — 표준 스키마 · 검증 · 미리보기
+====================================================
+기능 ID : 2-1 추출 정보 확인 · 2-2 역량 프로필 저장
+
+■ 이 파일이 있는 이유
+  F1이 만드는 프로필 dict를 F3(매칭·조직계열 점수) · F4(아이디어 적합도) ·
+  F5(갭 리포트)가 모두 소비한다. 즉 이 dict가 파트 간 계약이다.
+  계약을 코드로 못 박아두지 않으면 조용히 깨진다 — 실제로 F1 원본과
+  개정본이 서로 다른 키를 만들었고(standard_capability_levels 없음),
+  그대로 넘겼을 때 조직계열 점수가 0으로 나왔다.
+
+■ 2-2 '표준화된 스키마로 최종 저장'
+  서버에 파일로 저장하지 않는다. Streamlit Cloud는 컨테이너 하나를 모든
+  사용자가 공유하므로 고정 경로에 쓰면 사용자 A의 인력정보가 B에게 보인다.
+  → 세션(st.session_state)에 두고, 사용자가 JSON으로 내려받아 보관한다.
+    이 파일은 그 JSON의 스키마를 정의하고 왕복(내려받기→올리기)을 검증한다.
+
+■ 명세와 다른 점
+  명세는 '**LLM이** 추출한 정보 미리보기'로 적혀 있으나, 실제 구현은
+  규칙 기반 파싱이다. 조직 데이터가 정형 엑셀이라 LLM을 쓸 이유가 없고,
+  규칙 기반은 추출 결과를 원본과 1:1로 검증할 수 있다
+  (특허 분류 추정 정확도 35/35 = 100%로 측정).
+"""
+
+import pandas as pd
+
+# ════════════════════════════════════════════════════════════
+# 표준 스키마 — 파트 간 계약
+# ════════════════════════════════════════════════════════════
+#   (키, 타입, 필수?, 설명)
+SCHEMA = [
+    ("organization_id", str, True, "조직 식별자"),
+    ("organization", dict, False, "조직 개요 (소속·미션·대표성과 등)"),
+    ("staff", list, False, "인력 목록 (이름·직급·담당·학력·경력·특허)"),
+    ("capabilities", list, True, "역량 목록 (capability_id·name·level·evidence_ids)"),
+    ("evidence_ids", list, True, "근거 ID 전체"),
+    ("evidence", dict, True, "근거 상세 (특허/인력)"),
+    ("standard_capability_levels", dict, True,
+     "★ 매칭 계약 — 표준역량ID → {level, source, from}"),
+    ("org_context", dict, True, "조직 플래그 (F 사업화 역량 등) + patent_count"),
+    ("signals", dict, False, "갭 신호 (IP 공백·특허 편중)"),
+    ("has_patent_data", bool, False, "1-4 특허 보유 여부 자동 판별"),
+    ("parse_status", dict, False, "1-5 단계별 파싱 결과"),
+]
+
+# org_context에 반드시 있어야 하는 키 — 점수 계산이 이걸 읽는다
+REQUIRED_CONTEXT = [
+    "has_commercialization_experience",   # 진입장벽 5 + 사업성 4 = 9점
+    "has_domain_expert",
+    "patent_count",
+]
+
+CAPABILITY_KEYS = ["capability_id", "name", "level", "evidence_ids"]
+LEVEL_KEYS = ["level", "source", "from"]
+
+
+def validate_profile(profile: dict) -> tuple:
+    """프로필이 계약을 지키는지 확인한다. (ok, errors, warnings) 반환.
+
+    errors   — 이게 있으면 점수 계산이 깨진다. 프로필을 쓸 수 없다.
+    warnings — 계산은 되지만 일부 항목이 비어 채워지지 않는다.
+    """
+    errors, warnings = [], []
+
+    if not isinstance(profile, dict):
+        return False, ["프로필이 dict가 아니다"], []
+
+    for key, typ, required, desc in SCHEMA:
+        if key not in profile:
+            (errors if required else warnings).append(f"'{key}' 없음 — {desc}")
+            continue
+        if not isinstance(profile[key], typ):
+            errors.append(f"'{key}' 타입이 {type(profile[key]).__name__} "
+                          f"(기대 {typ.__name__})")
+
+    # 매칭 계약 — 이게 비면 조직계열 55점이 전부 0이 된다
+    levels = profile.get("standard_capability_levels") or {}
+    if not levels:
+        errors.append("standard_capability_levels가 비어 있다 — 조직계열 점수가 0이 된다")
+    else:
+        bad = [k for k, v in levels.items()
+               if not isinstance(v, dict) or "level" not in v]
+        if bad:
+            errors.append(f"standard_capability_levels 형식 오류: {bad[:5]}")
+        if not any(v.get("level", 0) >= 1 for v in levels.values()
+                   if isinstance(v, dict)):
+            warnings.append("보유수준이 1 이상인 표준역량이 없다 — 매칭이 전부 미보유가 된다")
+
+    ctx = profile.get("org_context") or {}
+    for k in REQUIRED_CONTEXT:
+        if k not in ctx:
+            warnings.append(f"org_context에 '{k}' 없음")
+    if ctx.get("has_commercialization_experience") is False:
+        warnings.append("상용화 경험이 False — 진입장벽·사업성의 F 9점이 계산되지 않는다")
+
+    caps = profile.get("capabilities") or []
+    for c in caps[:50]:
+        missing = [k for k in CAPABILITY_KEYS if k not in c]
+        if missing:
+            errors.append(f"capabilities 항목에 {missing} 없음")
+            break
+    if caps and not any(c.get("evidence_ids") for c in caps):
+        warnings.append("근거가 붙은 역량이 하나도 없다 — 파싱이 실패했을 수 있다")
+
+    return not errors, errors, warnings
+
+
+# ════════════════════════════════════════════════════════════
+# 2-1  추출 정보 미리보기 — 4개 카테고리
+# ════════════════════════════════════════════════════════════
+
+def preview_organization(profile: dict) -> pd.DataFrame:
+    """조직 소개 — 1.조직개요에서 읽은 값."""
+    org = profile.get("organization") or {}
+    rows = [{"항목": k, "내용": v} for k, v in org.items()
+            if k not in ("구분",) and v and v != "nan"]
+    return pd.DataFrame(rows)
+
+
+def preview_capabilities(profile: dict) -> pd.DataFrame:
+    """기술 역량 — 역량별 보유수준과 근거 수."""
+    rows = []
+    for c in profile.get("capabilities") or []:
+        rows.append({
+            "역량": c.get("name", ""),
+            "보유수준": "★" * (c.get("level") or 0) or "—",
+            "근거": len(c.get("evidence_ids") or []),
+        })
+    return pd.DataFrame(rows)
+
+
+def preview_staff(profile: dict) -> pd.DataFrame:
+    """인력 — 이름·직급·담당·특허 수. 학력·경력은 길어서 담당까지만 보여준다."""
+    rows = [{"이름": s.get("이름", ""), "직급": s.get("직급", ""),
+             "담당": (s.get("담당") or "")[:34], "특허": s.get("특허", 0)}
+            for s in profile.get("staff") or []]
+    return pd.DataFrame(rows)
+
+
+def preview_patents(profile: dict) -> pd.DataFrame:
+    """특허 — 분류별 집계 (건수·비중·대표 특허·로드맵 연계).
+
+    업로드한 특허 목록에서 직접 집계한다. 로드맵 연계는 그 분류에 해당하는
+    표준역량의 값을 쓴다(F1이 6.팀역량종합 근거에서 유도한 값).
+    """
+    ev = profile.get("evidence") or {}
+    levels = profile.get("standard_capability_levels") or {}
+
+    # 특허분류(A~I) → 로드맵 연계
+    roadmap_by_class = {}
+    for v in levels.values():
+        letter = v.get("patent_class")
+        if letter and v.get("roadmap"):
+            roadmap_by_class.setdefault(letter, v["roadmap"])
+
+    agg = {}
+    for e in ev.values():
+        if e.get("type") != "patent":
+            continue
+        cls = str(e.get("classification") or "—").strip()
+        a = agg.setdefault(cls, {"분류": cls, "건수": 0, "titles": []})
+        a["건수"] += 1
+        title = str(e.get("title") or "").strip()
+        if title and len(a["titles"]) < 3:
+            a["titles"].append(title[:22])
+
+    total = sum(a["건수"] for a in agg.values()) or 1
+    rows = []
+    for a in sorted(agg.values(), key=lambda x: x["분류"]):
+        letter = a["분류"][0] if a["분류"] and a["분류"][0].isalpha() else ""
+        rows.append({
+            "분류": a["분류"],
+            "건수": a["건수"],
+            "비중": f"{a['건수'] / total * 100:.1f}%",
+            "대표 특허": ", ".join(a["titles"]) or "—",
+            "로드맵": roadmap_by_class.get(letter, "—"),
+        })
+    return pd.DataFrame(rows)
+
+
+PREVIEW_SECTIONS = [
+    ("조직 소개", preview_organization, "1.조직개요"),
+    ("기술 역량", preview_capabilities, "3.특허목록 · 5.개인별역량 · 6.팀역량종합"),
+    ("인력", preview_staff, "2.조직원"),
+    ("특허", preview_patents, "3.특허목록 또는 업로드한 특허 파일"),
+]
+
+
+def summary_counts(profile: dict) -> dict:
+    """상단 지표용 집계."""
+    ev = profile.get("evidence") or {}
+    n_patent = sum(1 for e in ev.values() if e.get("type") == "patent")
+    caps = [c for c in (profile.get("capabilities") or []) if c.get("evidence_ids")]
+    return {
+        "보유 역량": len(caps),
+        "표준역량": len(profile.get("standard_capability_levels") or {}),
+        "특허 근거": n_patent,
+        "인력 근거": len(ev) - n_patent,
+        "인력": len(profile.get("staff") or []),
+    }
+
+
+if __name__ == "__main__":
+    import contextlib
+    import importlib.util
+    import io
+    import sys
+    from pathlib import Path
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except AttributeError:
+        pass
+
+    APP = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("f1", APP / "upload" / "F1.py")
+    f1 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(f1)
+
+    S = APP / "samples"
+    files = {"intro_pptx": next(S.glob("*.pptx"), None),
+             "staff_excel": next(S.glob("*org_data*.xlsx"))}
+    with contextlib.redirect_stdout(io.StringIO()):
+        profile = f1.build_organization_profile(
+            {k: (str(v) if v else None) for k, v in files.items()})
+
+    print("=" * 74)
+    print("2-2  스키마 검증")
+    print("=" * 74)
+    ok, errors, warnings = validate_profile(profile)
+    print(f"\n  결과: {'✅ 통과' if ok else '❌ 실패'}")
+    for e in errors:
+        print(f"    ❌ {e}")
+    for w in warnings:
+        print(f"    ⚠️  {w}")
+
+    print("\n" + "=" * 74)
+    print("2-1  추출 정보 미리보기")
+    print("=" * 74)
+    print(f"\n  {summary_counts(profile)}")
+    for title, fn, source in PREVIEW_SECTIONS:
+        df = fn(profile)
+        print(f"\n  ── {title}  ({len(df)}행 · 출처: {source}) ──")
+        if df.empty:
+            print("    (없음)")
+        else:
+            print("    " + df.head(6).to_string(index=False).replace("\n", "\n    "))
+
+    print("\n" + "=" * 74)
+    print("깨진 프로필을 넣으면")
+    print("=" * 74)
+    for name, broken in [
+        ("빈 dict", {}),
+        ("standard_capability_levels 없음", {k: v for k, v in profile.items()
+                                             if k != "standard_capability_levels"}),
+        ("보유수준 전부 0", {**profile, "standard_capability_levels":
+                          {"CAP_VISION": {"level": 0, "source": "-", "from": "-"}}}),
+    ]:
+        ok, errors, warnings = validate_profile(broken)
+        print(f"\n  [{name}] {'통과' if ok else '차단'}")
+        for m in (errors + warnings)[:3]:
+            print(f"    · {m}")

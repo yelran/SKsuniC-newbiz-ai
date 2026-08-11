@@ -1,0 +1,26 @@
+# ⚠️ 첫 줄의 --extra-index-url은 지우지 말 것.
+#    sentence-transformers가 torch를 끌고 오는데, 기본 PyPI 버전은 CUDA(GPU)
+#    라이브러리까지 포함해 2.5GB가 넘는다. Render 빌드가 용량 초과로 실패한다.
+#    아래 CPU 전용 인덱스를 쓰면 약 200MB로 줄고, 서버는 어차피 GPU가 없어서
+#    동작은 동일하다.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+streamlit==1.38.0
+pandas==2.2.2
+openpyxl==3.1.5
+
+# F1 데이터 업로드 파싱 (1-1 ~ 1-3)
+python-pptx        # 조직소개서 pptx
+pdfplumber         # 조직소개서·인력정보 PDF
+reportlab>=4.0,<5  # 사용자가 바로 열어보는 F5 PDF 보고서 다운로드
+
+# F2-2·F4-1·F4-2·F4-3·F5 LLM 호출  ※ OPENAI_API_KEY 환경변수 필요
+openai>=2.0,<3
+python-dotenv>=1.0,<2       # .env에서 OPENAI_API_KEY 등을 읽는다
+
+# 로컬 임베딩 — 아이디어 적합도 판단형(F4-1)의 요구역량 추출에 반드시 필요하다.
+#   ※ F2-2 검색은 없어도 키워드 모드로 동작하지만, F4-1의
+#     map_text_to_capabilities()는 sentence_transformers를 무조건 import한다.
+#     빼면 "요구역량 추출 실패"로 아이디어 적합도 판단형이 통째로 막힌다.
+torch>=2.2,<3
+sentence-transformers>=3.0,<6
