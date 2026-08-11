@@ -1,24 +1,3 @@
-"""
-F3-4. 8개 항목 통합 및 최종 점수/추천 산출 (확정 배점표 2026-08-06 기준)
-
-■ 배점 (합 100점)
-  조직계열 55 (F3-2) : 조직역량적합도 20 · 역량전이가능성 15 · 부족역량수준 15 · 실행가능성 5
-  시장계열 45 (F2-5) : 시장성 15 · 경쟁강도 10 · 진입장벽 10 · 사업성 10
-  ※ 실제 배점은 f3_2.CAPS + f2_5.CAPS에서 읽어오며, 여기 숫자는 설명용이다.
-
-■ 미확인(None) 처리 — F2-5·F3-2와 동일 규약
-  파싱이 안 되거나 평가 대상이 없는 항목은 0점이 아니라 None이다.
-  0점을 주면 '자료가 없다'가 '나쁘다'로 바뀐다. None은 분모에서 빼고 100점으로 환산한다.
-  덕분에 시장 데이터가 없는 LLM 추천 후보도 DB 후보와 같은 척도로 비교된다.
-
-■ 이전 버전에서 제거한 것
-  의존 파일을 못 찾을 때 쓰던 Dummy 폴백을 없앴다. 폴백이 있으면 F2-5/F3-2가 없어도
-  '옛 배점(20/15/15/5 + 경쟁강도)'으로 조용히 계산돼서 틀린 점수를 정상 결과로 착각한다.
-  지금은 파일을 못 찾으면 즉시 FileNotFoundError로 멈춘다.
-
-실행: python F3-4.py
-"""
-
 import importlib.util
 import os
 from pathlib import Path
@@ -27,9 +6,6 @@ import pandas as pd
 
 BASE = Path(__file__).parent
 
-# 통합 폴더에서 F3-4가 쓰는 파일은 폴더가 갈린다.
-#   core/scoring/  F2-5, F3-2   ·   core/recommend/  F3-3
-# 그래서 자기 폴더만 봐서는 F3-3을 못 찾는다.
 SEARCH_DIRS = [
     Path(os.environ["SUNIC_CODE_DIR"]) if os.environ.get("SUNIC_CODE_DIR") else None,
     BASE,
@@ -43,12 +19,7 @@ SEARCH_DIRS = [
 
 
 def _load(name: str, filename: str):
-    """app 안에서 돌 때는 core/paths.py의 로더를 쓴다.
-
-    paths.load_module은 sys.modules 캐시를 쓴다. main.py가 이미 F2-5를
-    올려놨는데 여기서 또 로드하면 배점 상수가 두 벌 생겨서, CAPS를 고쳐도
-    한쪽만 바뀌는 사고가 난다. 캐시를 공유해야 한 벌로 유지된다.
-    """
+  
     try:
         from core.paths import load_module
         return load_module(name, filename)
@@ -75,7 +46,7 @@ f3_3 = _load("f3_3", "F3-3.py")
 
 
 # ════════════════════════════════════════════════════════════
-# 1. 배점 — F3-2/F2-5가 각자 들고 있는 값을 합쳐 만든다 (하드코딩 금지)
+# 1. 배점 
 # ════════════════════════════════════════════════════════════
 CAPS = {**f3_2.CAPS, **f2_5.CAPS}
 TOTAL_CAP = sum(CAPS.values())
@@ -91,29 +62,12 @@ if TOTAL_CAP != 100:
 # ════════════════════════════════════════════════════════════
 def calculate_score(required_caps_text, market_row: dict,
                     org_context: dict = None, return_detail: bool = False) -> dict:
-    """DB 한 행을 받아 8개 항목 + 총점을 계산한다.
-
-    Args:
-        required_caps_text : DB '필요역량태그' 원문 (또는 표준역량ID 리스트)
-        market_row         : DB 한 행 dict — '시장규모', '진입장벽수준' 등
-        org_context        : F2-5가 쓰는 조직 플래그
-                             (has_commercialization_experience 등)
-        return_detail      : True면 매칭·세부항목까지 반환
-
-    Returns:
-        {"scores": {8개 항목: float|None},
-         "total_score": float,   # 미확인 항목을 뺀 분모로 100점 환산
-         "raw_score": float,     # 환산 전 획득 점수
-         "denominator": int}     # 실제 적용된 배점 합
-    """
+    
     org_context = org_context or {}
 
     org_scores, org_detail = f3_2.calculate_org_series_scores(
         required_caps_text, org_context, return_detail=True)
 
-    # F2-5는 파싱된 값을 받는다 — 원시 시장규모(억달러)와 진입장벽 등급.
-    # (이전 버전의 parse_market_size_to_category / parse_company_case_count는
-    #  F2-3에서 사분위 방식으로 바뀌고 경쟁강도가 삭제되면서 사라졌다.)
     market_data = {
         "market_size_usd": f2_5.parse_market_size_usd(market_row.get("시장규모")),
         "entry_barrier": f2_5.parse_entry_barrier_level(market_row.get("진입장벽수준")),
@@ -169,7 +123,7 @@ def score_all(org_context: dict = None, df: pd.DataFrame = None) -> list:
 
 def get_top_k_recommendations(org_context: dict = None, top_k: int = 3,
                               constraints: dict = None) -> list:
-    """F3-3 필터를 통과한 후보를 총점순 Top-K로 반환. 대시보드용 API."""
+    """필터를 통과한 후보를 총점순 Top-K로 반환. 대시보드용 API."""
     candidates = score_all(org_context)
     constraints = constraints or {"min_total_score": 40}
     passed = f3_3.filter_feasibility(candidates, constraints)
@@ -211,7 +165,7 @@ if __name__ == "__main__":
     # [검증 1] 멘토 검증 케이스
     hit = df[df["아이디어명"].astype(str).str.contains(MENTOR_CASE, na=False)]
     if hit.empty:
-        print(f"⚠️ 멘토 검증 케이스('{MENTOR_CASE}')를 DB에서 찾지 못했습니다.")
+        print(f" 멘토 검증 케이스('{MENTOR_CASE}')를 DB에서 찾지 못했습니다.")
     else:
         row = hit.iloc[0]
         res = calculate_score(row.get("필요역량태그", ""), row.to_dict(), org_context)
