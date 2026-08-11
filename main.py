@@ -1,42 +1,3 @@
-"""
-신사업 진단 AI —  대시보드 통합 (Streamlit)
-================================================
-인트로 → STEP1~3 파일 업로드 → 분석 완료 → 대시보드
-
-■ 연결된 파트 (파이프라인 12단계 기준)
-  1~4   F1     업로드 → 파싱 → 조직 역량 프로필 (세션 전용, 서버 저장 없음)
-  4     F2     profile_schema 표준 스키마 검증
-  5B·6B F2-2   DB 후보 검색  ·  F4-3  DB 밖 신규 후보 LLM 제안
-  5A·6A F4-1   아이디어 요구역량 추출  ·  F4-2  LLM 매칭 판단
-  7     F3-4   8개 항목 통합 100점 (= F3-2 조직계열 55 + F2-5 시장계열 45)
-  8     F3-3   실행 가능성 필터
-  9     F3-1   역량 교집합·차집합 (F3-2가 내부에서 사용)
-  10~11 F5     갭 리포트 · 보완전략 · 로드맵
-  12    F6     이 파일 (화면 라우팅·시각화)
-
-■ 축 연결 방식
-  · F1은 업로드된 조직 정보를 표준역량 축 CAP_* 32개에 매핑한다.
-  · 아이디어 요구역량(F4-1)도 같은 32개 표준역량 축을 직접 반환한다. 따라서
-    별도 번역 없이 required_capability_ids를 F4-4와 F3-2에 전달한다.
-  · 목록 밖 자유서술 역량은 표준 점수와 분리해 AI 판단임을 화면에 표시한다.
-  · 조직 사실(보유수준·특허건수·전담인력·로드맵연계)은 apply_org_levels()가
-    업로드 프로필의 standard_capability_levels를 F3-2에 주입한다. 주입하지 않으면
-    F3-2가 data/표준역량_정의.csv(샘플 조직 스냅샷)를 읽어, 누가 업로드해도
-    조직계열 55점이 같아진다.
-  · CSV에 남는 것은 조직과 무관한 정의뿐이다 — 표준역량명·역량성격·특허분류·전이출처.
-
-■ 남은 격차
-  - 로드맵연계의 '확장'·'보조' 등급은 업로드 양식에 신호가 없어 '핵심'으로 잡힌다
-    (샘플 기준 15개 중 13개 일치). 배점 영향은 B로드맵연계 4점.
-  - 전담인력은 특허 발명자 + staff_keyword로 판정해, CSV의 수동 배정보다 넓게 잡힌다
-    (샘플 기준 4개 역량이 '없음 → 있음'). C도메인인력부재 8점이 다소 높게 나온다.
-  - F2-4는 배점을 '설계'하는 분석 스크립트라 런타임에 부르지 않는다.
-    그 결론(배점)은 F3-2.CAPS + F2-5.CAPS 상수로 들어와 있다.
-  임의 값으로 채우지 않는다. 미평가 항목은 0이 아니라 None으로 두고 분모에서 뺀다.
-
-실행:  streamlit run main.py
-"""
-
 import base64
 import html
 import math
@@ -47,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# 경로는 core/paths.py에서만 정의한다. 여기서 Path를 새로 만들지 말 것.
+# 경로는 core/paths.py에서만 정의
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.paths import (  # noqa: E402
     ASSETS_DIR, DATA_DIR, DB_PATH, LOGO_PATH, SAMPLES_DIR,
@@ -58,17 +19,13 @@ from core.paths import (  # noqa: E402
 st.set_page_config(page_title="suniC · 신사업 진단 AI", page_icon="🩺", layout="wide")
 
 
-# ── 근거 ID(ev_patent_001 · ev_staff_노다혜) 화면에서 감추기 ──────────
-#   LLM에게 근거 ID 인용을 강제하는 이유는 지어낸 문장을 막기 위해서다
-#   (F4-2/F4-3이 응답을 받은 뒤 화이트리스트로 실재하는 ID인지 대조한다).
-#   그래서 ID 자체는 계속 받아야 하고, 사용자에게 보일 때만 지운다.
-#   ⚠️ 원본 dict는 건드리지 않는다 — 검증·PDF·디버그가 그대로 쓴다.
+
 _EV_ID = r"ev_[A-Za-z0-9_가-힣]+"
 _EV_GROUP = re.compile(                      # (ev_a, ev_b) / [ev_a] / (예: ev_a)
     r"\s*[\(\[]\s*(?:예\s*[:：]\s*)?" + _EV_ID
     + r"(?:\s*[,、·]\s*" + _EV_ID + r")*\s*[\)\]]")
-_EV_BARE = re.compile(r"\s*[,、·]?\s*" + _EV_ID)      # 괄호 밖 낱개
-_EV_TIDY = [                                          # 지운 자리 뒷정리
+_EV_BARE = re.compile(r"\s*[,、·]?\s*" + _EV_ID)      
+_EV_TIDY = [                                          
     (re.compile(r"\(\s*\)|\[\s*\]"), ""),
     (re.compile(r"\s+([,.·、)\]])"), r"\1"),
     (re.compile(r"([(\[])\s+"), r"\1"),
@@ -77,7 +34,6 @@ _EV_TIDY = [                                          # 지운 자리 뒷정리
 
 
 def strip_evidence_ids(text: str) -> str:
-    """화면 표시용으로 근거 ID를 지운다. 없는 문장은 그대로 돌려준다."""
     if not text:
         return text
     out = _EV_GROUP.sub("", str(text))
@@ -88,42 +44,19 @@ def strip_evidence_ids(text: str) -> str:
 
 
 def _safe_md_text(text: str) -> str:
-    """LLM 자유서술을 st.markdown / st.write 에 그대로 넘길 때 쓴다.
-
-    Streamlit Markdown이 `$...$`를 수식으로, `~`를 취소선 문법으로 해석해서
-    "$2.5M~80M 규모" 같은 문장이 통째로 깨진다. 마크다운 특수문자만 백슬래시로
-    막는다 — html.escape()는 여기서 쓰면 안 된다. unsafe_allow_html=False인
-    st.markdown은 HTML을 직접 이스케이프하므로, 미리 &amp;로 바꿔 넘기면
-    화면에 '&amp;'라는 글자가 그대로 보인다.
-    """
+    
     return (text or "").replace("\\", "\\\\").replace("$", "\\$").replace("~", "\\~")
 
 
 def _safe_llm_text(text: str) -> str:
-    """LLM 자유서술을 직접 만든 HTML 문자열 안에 끼워 넣을 때 쓴다.
-
-    unsafe_allow_html=True로 넘기는 f-string 전용이다. 마크다운 이스케이프에
-    더해 html.escape()까지 적용한다. st.markdown/st.write에 문자열을 그대로
-    넘기는 자리에는 _safe_md_text()를 쓸 것.
-    """
     return html.escape(_safe_md_text(text))
 
 
 def _brief(node: dict, key: str) -> str:
-    """대시보드용 짧은 버전(F5의 *_brief)을 꺼낸다.
-
-    F5가 같은 LLM 호출에서 원문과 짧은 버전을 함께 만든다. 화면은 짧은 쪽을,
-    PDF는 원문을 쓴다. *_brief가 없는 예전 리포트에서는 원문으로 되돌린다.
-    """
     return str(node.get(f"{key}_brief") or node.get(key) or "")
 
 
 def _f5_detail_block(pairs) -> str:
-    """'자세히 보기' 안을 '라벨 : 본문' 블록으로 그린다.
-
-    문단만 이어 붙이면 어디까지가 원인이고 어디부터 영향인지 구분이 안 돼서
-    라벨을 굵게 앞세운다. 길이는 F5가 이미 줄여 보내므로 여기서 자르지 않는다.
-    """
     return "".join(
         f'<div class="f5-dt-row"><p class="f5-dt-label">{html.escape(str(label))}</p>'
         f'<p class="f5-dt-body">{_safe_llm_text(str(text))}</p></div>'
@@ -139,20 +72,11 @@ def _download_filename_part(value: object, fallback: str = "gap_report") -> str:
     return cleaned[:60] or fallback
 
 
-# ════════════════════════════════════════════════════════════
-# 파트 모듈 로드
-#   필수  : 없으면 앱이 뜨지 않는다
-#   선택  : 없으면 해당 화면만 '연결 대기'로 표시한다
-# ════════════════════════════════════════════════════════════
 f2_5 = load_module("f2_5", "F2-5.py")
 profile_schema = load_module("profile_schema", "profile_schema.py")
-
-# 선택 — 없거나 로드 실패하면 해당 기능만 '연결 대기'로 표시하고 앱은 계속 뜬다.
-#   ⚠️ F2-4는 여기서 로드하지 않는다. 엔트로피 가중치를 '설계'하는 분석 스크립트이고,
-#      그 결론(배점)은 이미 F3-2.CAPS + F2-5.CAPS에 상수로 들어와 있다.
-#      런타임에 또 부르면 같은 배점을 두 곳에서 정하게 된다.
+.
 f3_2 = try_load_module("f3_2", "F3-2.py")   # 조직계열 55점
-f3_3 = try_load_module("f3_3", "F3-3.py")   # 실행 가능성 필터 (8단계)
+f3_3 = try_load_module("f3_3", "F3-3.py")   # 실행 가능성 필터 
 f3_4 = try_load_module("f3_4", "F3-4.py")   # 8개 항목 통합 100점
 f4_1 = try_load_module("f4_1", "F4-1.py")   # 아이디어 요구역량 추출
 f4_2 = try_load_module("f4_2", "F4-2.py")   # LLM 매칭 판단·재정렬
@@ -167,12 +91,6 @@ def _build_f5_pdf_download(report: dict, subject_name: str) -> bytes:
 
     return f5.export_gap_report_pdf(report, subject_name=subject_name)
 
-# 평가 항목 — (항목명, 배점, 담당 파트). F3-2.CAPS/F2-5.CAPS에서 그대로 읽어온다.
-#   ⚠️ 예전엔 여기 (24/18/18/5 + 15/10/10)을 하드코딩해뒀었는데, F3-2/F2-5가
-#      배점표를 (20/15/15/5 + 15/10/10/10, 경쟁강도 부활)로 바꾼 뒤에도 이 상수는
-#      안 바뀌어서 화면에 경쟁강도 행이 아예 안 뜨고 나머지 배점도 틀리게
-#      표시되고 있었다(2026-08-06 발견). 항목이 또 바뀌어도 이 파일을 안 고쳐도
-#      되게, 실제 배점표(f3_2.CAPS/f2_5.CAPS)에서 매번 만든다.
 def _build_items() -> list:
     org_caps = f3_2.CAPS if f3_2 else {
         "조직역량적합도": 20, "역량전이가능성": 15, "부족역량수준": 15, "실행가능성": 5}
@@ -186,29 +104,19 @@ MARKET_TOTAL = sum(m for _, m in MARKET_ITEMS)
 ORG_TOTAL = sum(m for _, m, part in ITEMS if part == "F3")
 
 
-# ════════════════════════════════════════════════════════════
+
 # 데이터
-# ════════════════════════════════════════════════════════════
 def load_f1():
     return load_module("f1", "F1.py")
 
 
 def _f1_version() -> float:
-    """F1.py의 수정 시각. 캐시 키에 넣어 F1을 고치면 자동으로 다시 파싱하게 한다.
-
-    ⚠️ F1은 importlib로 동적 로드하므로 Streamlit이 변경을 감지하지 못한다.
-       이걸 안 넣으면 F1을 고쳐도 예전 프로필이 계속 나온다 (실제로 겪었다).
-    """
+  
     return (UPLOAD_DIR / "F1.py").stat().st_mtime
 
 
 @st.cache_data(show_spinner="조직 데이터 분석 중…")
 def build_profile_from_bytes(payload: dict, _version: float) -> dict:
-    """업로드된 파일(bytes)로 F1을 실행한다.
-
-    payload는 {"org_intro": bytes|None, "hr_info": bytes, "patent": bytes|None}.
-    bytes를 키로 캐싱하므로 같은 파일을 다시 올리면 재파싱하지 않는다.
-    """
     f1 = load_f1()
     return f1.build_organization_profile({
         "intro_pptx": payload.get("org_intro"),
@@ -219,7 +127,6 @@ def build_profile_from_bytes(payload: dict, _version: float) -> dict:
 
 @st.cache_data(show_spinner="샘플 조직 데이터 분석 중…")
 def build_profile_from_samples(_version: float) -> dict:
-    """개발용 — samples/ 폴더가 있으면 그걸로 프로필을 만든다."""
     f1 = load_f1()
     pptx = next(SAMPLES_DIR.glob("*.pptx"), None)
     xlsx = next(SAMPLES_DIR.glob("*org_data*.xlsx"), None)
@@ -232,7 +139,6 @@ def build_profile_from_samples(_version: float) -> dict:
 
 
 def _stamp(profile: dict, source: str) -> dict:
-    """프로필에 출처·시각을 붙인다 (2-3 표준 스키마의 _meta)."""
     from datetime import datetime
     out = dict(profile)
     out["_meta"] = {
@@ -244,19 +150,6 @@ def _stamp(profile: dict, source: str) -> dict:
 
 
 def load_org_profile() -> dict:
-    """조직 역량 프로필을 가져온다. 업로드한 파일만 쓴다.
-
-    ⚠️ 파일에서 읽지 않는다. 배포 시 Streamlit Cloud는 컨테이너 하나를 모든
-       사용자가 공유하므로, 고정 경로에 쓰고 읽으면 사용자 A가 올린 조직
-       인력정보·특허목록이 사용자 B에게 그대로 보인다.
-       st.session_state는 브라우저 세션마다 격리되므로 여기만 신뢰한다.
-       → 창을 닫으면 사라진다.
-
-    ⚠️ samples/를 자동으로 대체하지 않는다. 업로드가 없을 때 개발용 샘플로
-       채우면 '아무것도 안 올렸는데 결과가 나오는' 상태가 된다.
-       F3-4가 의존성이 없을 때 Dummy 클래스로 조용히 돌던 것과 같은 문제다.
-       개발 중 샘플을 쓰려면 URL에 ?dev=1 을 붙인다 (화면에 표시된다).
-    """
     if st.session_state.get("profile"):
         return st.session_state["profile"]
 
@@ -282,18 +175,6 @@ def load_org_profile() -> dict:
 
 
 def apply_org_levels(profile: dict | None) -> tuple:
-    """업로드된 조직 프로필을 F3-2에 주입한다 (4단계 → 7단계 연결).
-
-    F1이 표준역량별로 만들어 준 보유수준·특허건수·전담인력·로드맵연계를 넘긴다.
-
-    ⚠️ 이걸 안 하면 F3-2가 data/표준역량_정의.csv를 읽는다. 그 CSV는 샘플 조직의
-       스냅샷이라, 다른 조직이 업로드해도 조직계열 점수가 똑같이 나온다
-       (업로드→파싱 결과가 점수에 반영되지 않는다).
-
-    ⚠️ @st.cache_data 안에서 부르면 안 된다. 캐시 적중 시 함수 본문이 실행되지 않아
-       주입이 건너뛰어진다. 매 rerun마다 캐시 밖에서 부르고, 반환한 튜플을
-       load_scored_db의 캐시 키로 넘겨 조직이 바뀌면 점수도 다시 계산되게 한다.
-    """
     if not f3_2:
         return ()
     caps = (profile or {}).get("standard_capability_levels") or {}
@@ -306,15 +187,6 @@ def apply_org_levels(profile: dict | None) -> tuple:
 
 @st.cache_data
 def load_scored_db(org_context: dict, org_levels: tuple = ()) -> pd.DataFrame:
-    """신사업 DB 50건 × 8개 항목 점수 (7단계 '매칭 결과에 점수 매기기').
-
-    F3-4가 있으면 조직계열 55점(F3-2) + 시장계열 45점(F2-5)을 합쳐 100점으로 채점하고,
-    없으면 시장계열 45점만 채운다(조직계열은 None → 화면에서 '미연결').
-
-    ⚠️ None은 0이 아니다. F2-5·F3-2·F3-4가 공통으로 쓰는 규약으로, '자료 없음'을
-       0점으로 바꾸면 '나쁨'이 된다. None인 항목은 분모에서 빠지고 100점으로 환산된다.
-       그래서 시장 데이터가 없는 후보도 같은 척도로 비교된다.
-    """
     df = pd.read_excel(DB_PATH)
     rows = []
     for _, row in df.iterrows():
@@ -386,7 +258,6 @@ def feasibility_pass(db: pd.DataFrame, constraints: dict = None) -> pd.DataFrame
 
 @st.cache_resource(show_spinner="임베딩 모델 로딩 중… (최초 1회)")
 def load_embedder():
-    """F2-2.py 와 동일 모델. 최초 1회만 로딩."""
     from sentence_transformers import SentenceTransformer
     return SentenceTransformer("jhgan/ko-sroberta-multitask")
 
@@ -397,13 +268,12 @@ def build_doc_embeddings(texts: tuple):
     return model.encode(list(texts), convert_to_tensor=True)
 
 
-KEYWORD_MATCH_BONUS = 0.5   # F2-2.py 와 동일
-MIN_ABSOLUTE_SCORE = 0.3    # F2-2.py 와 동일
+KEYWORD_MATCH_BONUS = 0.5   
+MIN_ABSOLUTE_SCORE = 0.3    
 
 
 def retrieve_business_candidates(db: pd.DataFrame, query: str, top_k: int = 3,
                                  mode: str = "키워드") -> pd.DataFrame:
-    """F2-2. 검색어가 없으면 총점 순으로 반환."""
     if not query.strip():
         return db.sort_values("총점", ascending=False).head(top_k).assign(검색근거="8개 항목 총점순")
 
@@ -442,9 +312,6 @@ def retrieve_business_candidates(db: pd.DataFrame, query: str, top_k: int = 3,
     return out
 
 
-# ════════════════════════════════════════════════════════════
-# 디자인 — onboarding_final.html 과 동일한 CSS
-# ════════════════════════════════════════════════════════════
 def logo_data_uri() -> str:
     if not LOGO_PATH.exists():
         return ""
@@ -456,7 +323,6 @@ SPARKLE = ("url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' v
            "27 47 47 27 50 0Z'/%3E%3C/svg%3E\")")
 
 
-# 업로드 박스 안에 넣을 문서 아이콘 (CSS ::before 용 data URI)
 DOC_ICON_URI = (
     "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='30' height='36' "
     "viewBox='0 0 30 36' fill='none'%3E"
@@ -469,10 +335,9 @@ DOC_ICON_URI = (
 
 def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
     logo = logo_data_uri()
-    card_mode = 1 <= screen <= 4          # 블록 컨테이너 자체를 흰 카드로
+    card_mode = 1 <= screen <= 4          
     intro_mode = screen == 0
 
-    # 파일을 올린 뒤에는 점선 박스 안에 올린 파일만 보이도록 (아이콘·제목·Browse 숨김)
     uploaded_css = ""
     if uploaded:
         uploaded_css = """
@@ -489,7 +354,7 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
 [data-testid="stFileUploaderFileName"]{font-size:12.5px;color:var(--text);font-weight:500}
 """
 
-    # 인트로 진입 애니메이션 — 아래에서 위로 순차 등장
+    
     intro_anim_css = ""
     if intro_mode:
         intro_anim_css = (
@@ -501,7 +366,7 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             ".stButton{animation-delay:.40s}"
         )
 
-    # STEP 1~4 공통 레이아웃: 카드는 화면 정중앙, 버튼 줄은 항상 카드 맨 아래
+    # STEP 1~4 
     card_layout_css = ""
     if card_mode:
         card_layout_css = (
@@ -519,34 +384,20 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             "{display:flex;justify-content:flex-end}"
         )
     if screen == 4:
-        # 분석 완료 화면: 남는 공간을 점선 박스 위·아래로 균등 분배 (진행바·제목은 그대로 위 고정)
         card_layout_css += (
             ".block-container [data-testid='stVerticalBlock']>[data-testid='element-container']"
             ":nth-child(3){margin-top:auto;margin-bottom:auto}"
         )
     if screen == 5:
-        # 대시보드: 로고는 헤더 안에 있으므로 우상단 고정 로고는 숨기고, 버튼은 작게
-        # 컬럼 안에 중첩된 가로 블록 = 헤더의 탭 그룹 (대시보드에서 여기뿐)
         head = "[data-testid='column'] [data-testid='stHorizontalBlock']"
-        # 아이디어 입력 폼 카드 = .form-card-marker를 '바로 아래 단계'에 가진 bordered container.
-        # 예전엔 .form-badge로 찾았는데, 탭 선택 버튼을 넣으려고 배지를 st.columns()
-        # 안에 넣으면서 배지가 카드 기준 3단계 밑이 아니라 더 깊이 들어가 매칭이
-        # 깨졌다(대신 badge_col 자신의 작은 래퍼가 잘못 매칭됨 — 실측 확인, 2026-08-06).
-        # 그래서 배지와 별개로, 카드 맨 앞에 항상 1단계 깊이로 남는 숨김 마커를 둔다.
         form_card = ("[data-testid='stVerticalBlockBorderWrapper']"
                      ":has(>div>[data-testid='stVerticalBlock']"
                      ">[data-testid='element-container'] .form-card-marker)")
-        # LLM추천 후보(F4-3) 카드 = .newcand-marker를 가진 bordered container.
-        # 버튼을 카드 안에 넣기 위해 st.container(border=True)로 감싼다.
         newcand_card = ("[data-testid='stVerticalBlockBorderWrapper']"
                         ":has(>div>[data-testid='stVerticalBlock']"
                         ">[data-testid='element-container'] .newcand-marker)")
-        # 아이디어 탭 줄 = .idea-tabs-marker 바로 다음에 오는 가로 블록.
-        # (표식 자체는 안 보이게 숨기고, 형제 선택자로 그 다음 줄만 집어낸다)
         idea_tabs_mark = "[data-testid='element-container']:has(.idea-tabs-marker)"
         idea_tabs = f"{idea_tabs_mark}+[data-testid='stHorizontalBlock']"
-        # 스코어카드 = .scorecard-marker를 가진 bordered container.
-        # 'DB 원문보기' 버튼을 카드 우상단에 절대배치하려고 컨테이너로 감쌌다.
         scorecard_card = ("[data-testid='stVerticalBlockBorderWrapper']"
                           ":has(>div>[data-testid='stVerticalBlock']"
                           ">[data-testid='element-container'] .scorecard-marker)")
@@ -555,57 +406,44 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             ".stButton>button{height:34px;min-height:34px;padding:0 15px;font-size:13px;"
             "border-radius:8px;box-shadow:none;font-weight:500}"
             ".stButton>button[kind='primary']{font-weight:600;box-shadow:none}"
-            "[data-testid='stVerticalBlock']{gap:1rem}"      # 모든 카드 사이 간격 16px 동일
+            "[data-testid='stVerticalBlock']{gap:1rem}"      
             "[data-testid='stHorizontalBlock']{align-items:stretch}"
-            # 헤더 탭 — 예시 대시보드의 알약 그룹 (오른쪽 끝 정렬, 선택된 것만 흰 카드)
+           
             f"{head}"
             "{background:var(--surface-2);border-radius:10px;padding:4px;gap:4px;"
             "width:fit-content;max-width:100%;margin-left:auto;margin-top:8px;"
-            # 자리가 정말 없으면 겹치는 대신 아랫줄로 접힌다 (최후의 안전망)
+            
             "flex-wrap:wrap;justify-content:flex-end}"
-            # ⚠️ Streamlit 컬럼은 폭이 비율(%)로 정해져서, 창을 줄이면 칸이 버튼
-            #    글자보다 좁아진다. 버튼은 white-space:nowrap이라 안 줄고 칸 밖으로
-            #    삐져나가 옆 버튼과 겹쳤다. 칸을 '글자 폭만큼'으로 바꿔서 원인을 없앤다.
             f"{head}>[data-testid='column']"
             "{flex:0 0 auto;width:auto;min-width:0}"
             f"{head} .stButton>button"
-            # 글씨만 줄이고 좌우 여백으로 보정해 버튼 박스 크기는 유지
+            
             "{height:30px;min-height:30px;border-radius:7px;white-space:nowrap;"
             "width:100%;padding:0 20px;font-size:10.5px}"
-            # 창이 좁아질수록 여백·글씨를 단계적으로 줄여 한 줄을 최대한 유지한다
+            
             f"@media (max-width:1200px){{{head} .stButton>button"
             "{padding:0 14px;font-size:10px}}"
             f"@media (max-width:992px){{{head} .stButton>button"
             "{padding:0 9px;font-size:9.5px}}"
             f"@media (max-width:768px){{{head}{{margin-left:0}}"
             f"{head} .stButton>button{{padding:0 7px;font-size:9px}}}}"
-            # Streamlit이 마크다운 끝의 <p> 여백을 상쇄하려고 넣는 -16px 때문에
-            # 커스텀 HTML 카드의 아래가 잘려 다음 카드와 겹친다 → 0으로 되돌리고
-            # 카드 사이 간격은 세로 블록의 gap 하나로 통일한다.
+          
             "[data-testid='stMarkdownContainer']{margin-bottom:0}"
-            # 아이디어 입력 폼 — st.container(border=True)를 예시의 흰 카드로.
-            # 직계 경로로 한정해야 바깥 래퍼까지 카드가 되지 않는다.
+            
             f"{form_card}"
             "{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:18px}"
             f"{form_card} [data-testid='stVerticalBlock']{{gap:0.6rem}}"
-            # 마커 자체는 화면에 안 보여야 하는데, display:none이어도 그걸 감싼
-            # element-container는 자리(gap)를 차지한다 — newcand_card와 같은 이유로 숨김.
+            
             f"{form_card} [data-testid='element-container']:has(.form-card-marker)"
             "{display:none}"
-            # ── 아이디어 탭 줄 — 카드 위에 '붙는' 브라우저 탭 모양 ──
-            # 묶음 자체는 배경도 테두리도 없다. 탭 한 칸 한 칸이 카드와 같은 흰
-            # 배경을 갖고, 아래 테두리만 지워서 바로 밑 입력 카드와 한 장처럼
-            # 이어 보이게 한다. 예전엔 묶음에 연한 민트 배경을 깔고 선택된 탭만
-            # 흰색으로 띄웠는데, 그러면 탭 줄이 카드와 분리된 별도 상자로 읽혔다.
+            
             f"{idea_tabs_mark}{{display:none}}"
             f"{idea_tabs}"
-            # margin-bottom은 카드 사이 기본 간격(stVerticalBlock gap:1rem=16px)을
-            # 그대로 상쇄하는 값이다. 이 둘이 어긋나면 탭과 카드가 다시 떨어진다.
+            
             "{width:fit-content;margin-left:auto;margin-bottom:-16px;gap:2px;"
             "padding:0;background:transparent;border:none;"
             "flex-wrap:nowrap;position:relative;z-index:1}"
-            # 컬럼 폭을 내용(=버튼 30px)에 맞춘다. 비율(%)로 두면 화면 폭에 따라
-            # 탭 사이가 벌어지거나 겹친다 — 헤더 탭과 같은 이유.
+           
             f"{idea_tabs}>[data-testid='column']"
             "{flex:0 0 auto;width:auto;min-width:0}"
             f"{idea_tabs} .stButton>button"
@@ -615,16 +453,15 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             "border:1px solid var(--border);border-bottom:none;box-shadow:none}"
             f"{idea_tabs} .stButton>button:hover"
             "{background:var(--accent-bg);color:var(--accent)}"
-            # 선택된 탭은 민트로 꽉 채운다 — 지금 몇 번 탭인지 한눈에 보이게.
+            
             f"{idea_tabs} .stButton>button[kind='primary'],"
             f"{idea_tabs} .stButton>button[kind='primary']:hover"
             "{background:var(--accent);color:#FFFFFF;font-weight:700;"
             "border-color:var(--accent)}"
-            # 맨 끝 '＋'는 탭이 아니라 추가 버튼 — 민트 글씨로 구분한다.
+            
             f"{idea_tabs}>[data-testid='column']:last-child .stButton>button"
             "{color:var(--accent);font-weight:400;font-size:13px}"
-            # 4칸을 다 채우기 전에는 '적합도 판단하기'가 비활성이다.
-            # 기본 primary 색이 그대로면 눌리는 버튼처럼 보여서 회색으로 낮춘다.
+            
             f"{form_card} .stButton>button:disabled,"
             f"{form_card} .stButton>button:disabled:hover"
             "{background:var(--surface-2);color:var(--text-3);border:1px solid var(--border);"
@@ -632,7 +469,7 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             "[data-testid='stWidgetLabel'] p{font-size:12px;color:var(--text-2);margin-bottom:2px}"
             ".stTextInput input{height:36px;border-radius:8px;font-size:13px}"
             ".stTextArea textarea{border-radius:8px;font-size:13px}"
-            # 입력창 테두리 — Streamlit 기본은 배경과 같은 색이라 안 보인다
+            
             "[data-baseweb='input'],[data-baseweb='textarea']"
             "{border-color:var(--border);background:var(--surface)}"
             "[data-baseweb='base-input'],[data-baseweb='input'] input,"
@@ -646,33 +483,26 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             f"{head} .stButton>button[kind='secondary']"
             "{background:transparent;color:var(--text-2);box-shadow:none;font-weight:400}"
             f"{head} .stButton>button[kind='secondary']:hover{{color:var(--text);background:transparent}}"
-            # LLM추천 후보 카드 — note-card와 같은 톤 + 버튼·글씨를 더 작게
+            
             f"{newcand_card}"
             "{background:var(--surface);border:1px solid var(--border);"
             "border-radius:12px;padding:16px}"
             f"{newcand_card} .stButton>button{{height:28px;min-height:28px;"
             "padding:0 12px;font-size:11px;border-radius:7px}"
-            # 후보 카드마다 붙는 '이 아이디어로 적합도 판단하기'(secondary)는
-            # 카드 안의 보조 동작이라 더 작게. '다시 제안받기'(primary)는 그대로 둔다.
+            
             f"{newcand_card} .stButton>button[kind='secondary']"
             "{height:22px;min-height:22px;padding:0 8px;font-size:9px;border-radius:6px}"
-            # 마지막 요소 = '다시 제안받기'. 바로 위 후보 카드 버튼과 붙어 보여서
-            # 다른 동작인 걸 알기 어려웠다 → 위쪽만 따로 띄운다.
+            
             f"{newcand_card}>div>[data-testid='stVerticalBlock']"
             ">[data-testid='element-container']:last-child{margin-top:26px}"
-            # 카드 위/아래 여백을 같게 만든다.
-            #   (카드 위 ~ 'LLM추천 후보')  ==  (버튼 아래 ~ 카드 아래)  == padding 16px
-            #   ① 표식 span의 element-container는 display:none이어도 자리(gap)를 차지한다
-            #   ② 제목·설명 <p>의 기본 margin이 위쪽 여백을 키운다 → 0으로 지우고
-            #      요소 간 간격은 세로 블록 gap 하나로만 준다
+            
             f"{newcand_card} [data-testid='element-container']:has(.newcand-marker)"
             "{display:none}"
             f"{newcand_card} [data-testid='stVerticalBlock']{{gap:10px}}"
             f"{newcand_card} .section-title{{margin:0 0 4px}}"
             f"{newcand_card} p{{margin:0}}"
             f"{newcand_card} [data-testid='stMarkdownContainer']{{margin:0}}"
-            # 순위 카드 — 카드 위에 투명 버튼을 겹쳐 카드 전체를 클릭 영역으로 만든다.
-            # (<a>를 쓰면 페이지가 새로 로드돼 업로드한 프로필이 날아간다)
+            
             "[data-testid='column']:has(.card) [data-testid='stVerticalBlock']"
             "{position:relative}"
             "[data-testid='column']:has(.card) [data-testid='element-container']"
@@ -682,65 +512,46 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
             "[data-testid='column']:has(.card) [data-testid='stButton']>button"
             "{width:100%;height:100%;min-height:0;padding:0;border:none;"
             "background:transparent;box-shadow:none;opacity:0;cursor:pointer}"
-            # 스코어카드 — 제목 옆에 'DB 원문보기'를 나란히
+            
             f"{scorecard_card}"
             "{background:var(--surface);border:1px solid var(--border);"
             "border-radius:12px;padding:16px}"
-            # 표식 span의 element-container는 display:none이어도 자리를 차지한다
+            
             f"{scorecard_card} [data-testid='element-container']:has(.scorecard-marker)"
             "{display:none}"
-            # 세로 블록을 '줄바꿈되는 가로 행'으로 바꾼다.
-            # 제목·버튼은 내용만큼만 차지해 한 줄에 나란히 서고,
-            # 표(.sc-body)는 width:100%라서 다음 줄로 넘어간다.
+          
             f"{scorecard_card}>div>[data-testid='stVerticalBlock']"
             "{flex-direction:row;flex-wrap:wrap;align-items:baseline;gap:0 10px}"
-            # 제목 칸은 '줄어들 수 있게'(flex-shrink:1 + min-width:0) 둔다.
-            #
-            # ⚠️ 아래 규칙들은 자손 결합자(공백) + !important로 쓴다. 직계 자식 체인
-            #    ('>div>[stVerticalBlock]>[element-container]')으로 적었더니 실제
-            #    사용자 화면에서 부모에는 flex-direction:row가 걸렸는데도 자식 폭만
-            #    행 전체로 남아 버튼이 아랫줄로 떨어졌다(실측, 2026-08-09).
-            #    Streamlit이 element-container에 width:100%를 직접 주기 때문에,
-            #    중간 래퍼가 하나만 끼어도 체인이 끊기며 100%로 되돌아간다.
+            
             f"{scorecard_card} [data-testid='stVerticalBlock']"
             " [data-testid='element-container']"
             "{width:auto !important;flex:0 1 auto;min-width:0}"
-            # ⚠️ 제목 칸은 flex-basis를 auto로 두되 버튼 자리를 미리 빼둔다.
-            #    flex-wrap:wrap은 '줄이기'보다 '줄바꿈'을 먼저 하기 때문에, 기준 폭이
-            #    글자 폭 그대로면 제목이 남은 자리보다 조금만 길어도 제목을 줄이는
-            #    대신 버튼을 아랫줄로 보내버린다. 그 뒤 혼자 남은 제목이 행 전체로
-            #    늘어난다(실측: 행 387px, 제목 290+간격10+버튼89=389 → 2px 초과로 깨짐).
-            #    flex-basis를 0으로 만들면 줄바꿈은 막히지만 flex-grow가 필요해지고,
-            #    그러면 제목 칸이 행 전체로 자라 버튼이 오른쪽 끝까지 밀린다
-            #    (원하는 모양은 '제목 바로 옆'이다).
+            
             f"{scorecard_card} [data-testid='element-container']:has(.sc-title)"
             "{flex:0 1 auto !important;max-width:calc(100% - 105px)}"
-            # element-container에만 min-width:0을 줘선 부족하다. 그 안의 마크다운
-            # 래퍼가 기본값(min-width:auto)이라 '제목 글자 폭'만큼 버티기 때문에,
-            # 안쪽까지 0으로 풀어야 .sc-title의 ellipsis가 동작한다.
+            
             f"{scorecard_card} [data-testid='stMarkdownContainer']"
             "{min-width:0}"
-            # 'DB 원문보기' 버튼은 절대 줄이지 않는다
+            
             f"{scorecard_card} [data-testid='element-container']:has(.stButton)"
             "{flex:0 0 auto !important}"
-            # 표는 반대로 항상 통째로 다음 줄을 차지한다
+            
             f"{scorecard_card} [data-testid='element-container']:has(.sc-body)"
             "{width:100% !important;flex:0 0 100%;margin-top:10px}"
             f"{scorecard_card} .sc-title{{font-size:14px;font-weight:600;margin:0;"
             "white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
-            # 제목보다 작은 글씨 + 연한 회색. baseline 정렬이라 제목 글자선에 맞는다.
+            
             f"{scorecard_card} .stButton>button{{height:auto;min-height:0;line-height:1.4;"
             "padding:0;border:none;background:transparent;box-shadow:none;"
             "color:var(--text-3);font-size:11px;font-weight:400}"
             f"{scorecard_card} .stButton>button:hover{{color:var(--accent);background:transparent}}"
         )
 
-    # F5 갭 리포트 카드(=.f5-card-anchor를 가진 bordered container) 선택자.
-    # 아래 CSS에서 여러 번 쓰여 길이가 부담스러워 변수로 뺐다.
+   
     F5_CARD = ('[data-testid="stVerticalBlockBorderWrapper"]'
                ':has(> div > [data-testid="stVerticalBlock"]'
                ' > [data-testid="element-container"] .f5-card-anchor)')
-    # 갭 리포트의 버튼 줄 = .f5-actions-anchor 표식 바로 다음에 오는 가로 블록.
+   
     F5_ACTIONS = ('[data-testid="element-container"]:has(.f5-actions-anchor)'
                   '+[data-testid="stHorizontalBlock"]')
 
@@ -753,7 +564,7 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
   --warn-bg:#FBEFE3; --warn:#A05A16;
 }}
 
-/* ── 공통 배경 (그라데이션 + 반짝이 2개) ── */
+/* ── 공통 배경  ── */
 .stApp{{
   background:
     {SPARKLE} no-repeat left 9% top 13% / 86px,
@@ -775,7 +586,7 @@ footer, #MainMenu{{visibility:hidden}}
 html, body, [class*="css"]{{font-family:"Pretendard","Apple SD Gothic Neo","Segoe UI",sans-serif}}
 body{{color:var(--text)}}
 
-/* 로고 — 오른쪽 위 고정 (여백 많은 원본 PNG를 크롭해서 사용) */
+/* 로고 — 오른쪽 위 고정 */
 .ob-logo{{
   position:fixed;z-index:1000;top:22px;right:34px;width:110px;height:28px;
   display:block;cursor:pointer;
@@ -785,7 +596,6 @@ body{{color:var(--text)}}
 }}
 
 /* ── 블록 컨테이너 ── */
-/* 온보딩 카드는 화면 정중앙에 오도록 부모를 flex로 */
 {card_layout_css}
 .block-container{{position:relative;z-index:1;
   {"max-width:520px;background:var(--surface);border-radius:18px;box-shadow:0 6px 24px rgba(20,60,50,.09);padding:36px 34px 30px;margin-top:0;margin-bottom:0;height:670px;"
@@ -804,10 +614,7 @@ body{{color:var(--text)}}
 .stButton>button:hover, .stButton>button[kind="primary"]:hover{{background:var(--accent-2);color:#fff;border:none}}
 .stButton>button:focus, .stButton>button[kind="primary"]:focus{{color:#fff;box-shadow:none;border:none}}
 .stButton>button[kind="primary"]:active{{background:var(--accent-2);color:#fff}}
-/* st.download_button은 .stButton이 아니라 stDownloadButton으로 렌더링돼서 위 규칙이
-   안 걸린다 — 테마 기본 primary(빨강)로 나오던 걸 같은 민트로 맞춘다.
-   ⚠️ 자손 결합자(공백)로 써야 한다. help=를 주면 버튼이 툴팁 래퍼로 한 번 더
-      감싸여서 '>button'(직계 자식)으로는 안 잡힌다(Streamlit 1.38 실측). */
+
 [data-testid="stDownloadButton"] button{{border-radius:18px;padding:9px 20px;font-size:13px;
   font-weight:600;font-family:inherit;border:none;background:var(--accent);color:#fff;
   box-shadow:0 4px 12px rgba(21,154,147,.24)}}
@@ -815,7 +622,7 @@ body{{color:var(--text)}}
 [data-testid="stDownloadButton"] button:active{{background:var(--accent-2);color:#fff;border:none}}
 [data-testid="stDownloadButton"] button:focus{{color:#fff;box-shadow:none;border:none}}
 [data-testid="stDownloadButton"] button p{{color:#fff}}
-/* 테두리를 border 대신 inset 그림자로 그려서, primary 버튼과 높이가 정확히 같아지게 함 */
+
 .stButton>button[kind="secondary"]{{
   background:transparent;color:var(--text-2);font-weight:500;border:none;
   box-shadow:inset 0 0 0 1px var(--border);
@@ -843,7 +650,7 @@ body{{color:var(--text)}}
 .ob-step{{font-size:13px;font-weight:600;color:var(--text);margin:0 0 16px}}
 .ob-head{{text-align:center;margin-bottom:6px}}
 .ob-title{{font-size:15px;font-weight:600;color:var(--text);margin:12px 0 0}}
-/* 위는 붙이고(=Streamlit 기본 간격만), 아래 버튼과는 넉넉히 — HTML 예시와 동일 */
+
 .ob-tip{{background:var(--surface-2);border-radius:12px;padding:14px 16px;margin:0 0 24px}}
 .ob-tip-title{{font-size:12.5px;font-weight:600;color:var(--text);margin:0 0 8px}}
 .ob-tip-title i{{font-style:normal;color:var(--accent)}}
@@ -851,7 +658,7 @@ body{{color:var(--text)}}
 .ob-tip li{{font-size:12px;color:var(--text-2);margin:0 0 6px;padding-left:12px;position:relative}}
 .ob-tip li:before{{content:"\\2022";position:absolute;left:0}}
 .ob-done-title{{font-size:20px;font-weight:700;color:var(--text);margin:0 0 4px;letter-spacing:-.3px}}
-/* 점선 박스는 파일 3개를 딱 맞게 감싼다. 남는 공간은 박스 위·아래 여백으로 */
+
 .ob-result-box{{border:1.5px dashed var(--accent);border-radius:14px;background:#FAFEFE;
   padding:16px;margin-bottom:28px}}
 .ob-chip{{display:flex;align-items:center;gap:14px;background:var(--accent-bg);border-radius:12px;padding:18px 20px;margin-bottom:12px}}
@@ -864,8 +671,7 @@ body{{color:var(--text)}}
   min-height:0;color:var(--text)}}   /* 후보 카드용 min-height:38px 무효화 */
 .ob-chip .csub{{font-size:11.5px;color:var(--text-2);margin:0;line-height:1.45}}
 .ob-done-note{{font-size:12.5px;color:var(--text-2);line-height:1.6;margin:0 0 4px}}
-/* 업로드된 파일 표시 — st.file_uploader의 점선 박스와 같은 모양으로 직접 그린다.
-   (위젯을 다시 그리면 화면 이동 후 상태가 비므로) */
+
 .up-box{{background:#FAFEFE;border:1.5px dashed var(--accent);border-radius:14px;
   min-height:250px;padding:16px;display:flex;flex-direction:column;
   margin-bottom:16px}}   /* st.file_uploader 위젯과 같은 아래 여백 */
@@ -875,20 +681,20 @@ body{{color:var(--text)}}
   background:url("{DOC_ICON_URI}") no-repeat center/contain;opacity:.75}}
 .up-name{{font-size:13.5px;font-weight:600;color:var(--text);overflow:hidden;
   text-overflow:ellipsis;white-space:nowrap}}
-/* 파일명 뒤 크기 → 남는 공간을 밀어내 ✕를 오른쪽 끝으로 보낸다 */
+
 .up-size{{font-size:12.5px;color:var(--text-3);flex:1;white-space:nowrap}}
 .up-x{{flex-shrink:0;width:26px;height:26px;border-radius:6px;text-decoration:none;
   display:flex;align-items:center;justify-content:center;
   font-size:17px;line-height:1;color:var(--text-2)}}
 .up-x:hover{{background:var(--surface-2);color:var(--text)}}
 
-/* 파일 업로더 — HTML 예시의 큰 점선 박스와 동일하게 (아이콘·제목을 박스 안으로) */
+/* 파일 업로더 */
 [data-testid="stFileUploaderDropzone"]{{
   background:#FAFEFE;border:1.5px dashed var(--accent);border-radius:14px;
   min-height:250px;padding:28px 16px;gap:0;
   display:flex;flex-direction:column;align-items:center;justify-content:center;
 }}
-/* Streamlit 기본 영문 안내·클라우드 아이콘 숨김 */
+/* Streamlit  */
 [data-testid="stFileUploaderDropzoneInstructions"]{{display:none}}
 [data-testid="stFileUploaderDropzone"]::before{{
   content:"";display:block;order:1;width:30px;height:36px;margin-bottom:14px;
@@ -959,15 +765,7 @@ body{{color:var(--text)}}
 .card.pick .tag{{background:var(--surface)}}
 .section-title{{font-size:14px;font-weight:600;margin:0 0 12px}}
 .canvaswrap{{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;margin:0}}
-/* 나란히 놓인 두 카드의 높이를 맞춘다.
-   ⚠️ [data-testid="column"]에 height:100%를 주면 안 된다. 컬럼은 flex 아이템이고
-      부모(stHorizontalBlock)의 높이가 내용으로 정해지므로 100%가 auto로 풀리면서
-      align-items:stretch가 무력화된다(실측: 583 vs 298로 어긋났다).
-      컬럼은 stretch에 맡기고, 그 안쪽 래퍼들만 100%로 이어 높이를 카드까지 전달한다. */
-/* 나란히 놓인 두 카드의 높이를 맞춘다. (Streamlit <p> 태그 래퍼 이슈 해결)
-   ⚠️ [data-testid="column"]에 height:100%를 주면 안 된다. ... (중략) ... */
-/* 나란히 놓인 두 카드의 높이를 맞춘다. (Streamlit <p> 태그 래퍼 이슈 해결)
-   ⚠️ [data-testid="column"]에 height:100%를 주면 안 된다. ... (중략) ... */
+
 [data-testid="stHorizontalBlock"]:has(.eq-card) [data-testid="column"]>div,
 [data-testid="stHorizontalBlock"]:has(.eq-card) [data-testid="stVerticalBlockBorderWrapper"]>div,
 [data-testid="stHorizontalBlock"]:has(.eq-card) [data-testid="stVerticalBlock"],
@@ -976,12 +774,7 @@ body{{color:var(--text)}}
 [data-testid="stHorizontalBlock"]:has(.eq-card) [data-testid="stMarkdownContainer"]{{
   height:100%}}
 .eq-card{{height:100%;display:flex;flex-direction:column;box-sizing:border-box}}
-/* 레이더는 '점수 산출 근거' 카드 높이에 맞춘다.
-   ⚠️ svg를 일반 흐름에 두면 viewBox 비율(1:1) 때문에 폭만큼 높이를 차지해서
-      레이더가 카드 높이를 끌어올린다(실측: 515px → 카드 583px).
-      absolute로 흐름에서 빼면 레이더는 높이를 만들지 않고, 카드 높이는 옆
-      카드에서 stretch로 정해진 뒤 그 안을 레이더가 채운다. */
-/* 절대 위치(absolute)를 해제하고 최소 높이를 강제 고정 */
+
 .radar-wrap{{flex:1; min-height:250px; display:flex; align-items:center; justify-content:center; margin-top:10px;}}
 .radar-wrap svg{{width:100%; max-height:250px; display:block;}}
 .sc-table{{width:100%;border-collapse:collapse;font-size:13px;border:none}}
@@ -1071,11 +864,7 @@ body{{color:var(--text)}}
 /* 제목과 설명은 서로 다른 element-container라 사이에 세로 블록 gap(1rem=16px)이
    그대로 들어간다 — margin만 0으로 줄여선 안 붙는다. 음수 margin으로 gap을 상쇄한다. */
 .f5-section-lead{{font-size:12px;color:var(--text-2);margin:-13px 0 14px;line-height:1.6}}
-/* 나란히 놓인 F5 카드 — 접힌 상태에서는 높이가 같고 '+ 자세히 보기'도 같은 줄에
-   오게 하되, 하나를 펼쳤을 때 옆 카드까지 같이 늘어나면 안 된다.
-   ⚠️ align-items:stretch(기본)로 높이를 맞추면 행 높이가 '가장 큰 카드'로 정해져서
-      한 장을 펼치는 순간 옆 카드도 같이 늘어난다. 그래서 stretch를 끄고(flex-start)
-      대신 min-height로 접힌 높이를 맞춘다 — 펼친 카드만 그 아래로 자란다. */
+
 [data-testid="stHorizontalBlock"]:has(.f5-eq-anchor){{align-items:flex-start}}
 [data-testid="stHorizontalBlock"]:has(.f5-eq-anchor) [data-testid="stVerticalBlockBorderWrapper"]>div>[data-testid="stVerticalBlock"]{{
   display:flex;flex-direction:column;min-height:var(--f5-card-min,126px)}}
@@ -1091,8 +880,7 @@ body{{color:var(--text)}}
 /* 권장·최우선이 붙은 보완전략 카드는 '테두리 링'으로 강조한다.
    왼쪽 굵은 띠(다른 카드와 같은 모양)로는 구분이 안 돼서, 네 변을 같은 굵기의
    민트로 두르고 바깥에 옅은 링을 한 겹 더 얹는다. */
-/* ⚠️ 테두리를 굵히면 그 카드만 2px 커져서 옆 카드와 높이가 어긋난다.
-      굵은 선은 inset 그림자로 그려 레이아웃 크기를 그대로 둔다. */
+
 [data-testid="stVerticalBlockBorderWrapper"]:has(> div > [data-testid="stVerticalBlock"] > [data-testid="element-container"] .f5-card-featured){{
   border-color:#2C7A73!important;border-left-width:1px!important;
   box-shadow:inset 0 0 0 2px #2C7A73, 0 0 0 3px rgba(44,122,115,.10)!important}}
@@ -1100,13 +888,7 @@ body{{color:var(--text)}}
    두 줄로 접히지 않게 한다(접히면 한쪽만 키가 커져 짝이 안 맞았다).
    .stButton과 stDownloadButton은 기본 padding·font가 달라 각각 눌러 맞춘다. */
 [data-testid="element-container"]:has(.f5-actions-anchor){{display:none}}
-/* ⚠️ Streamlit 컬럼은 폭이 비율(%)이라 화면이 넓어질수록 버튼이 같이 늘어나
-      둘 사이가 멀어졌다. 칸을 '내용 폭'으로 바꿔 버튼 크기만큼만 차지하게 한다
-      (헤더 탭·아이디어 탭에서 쓴 것과 같은 방법). 남는 자리는 오른쪽에 남는다. */
-/* 버튼 폭을 변수 하나로 묶어 '칸'과 '버튼'에 같이 먹인다.
-   ⚠️ 칸을 width:auto(내용 폭)로 두면 안 된다. 안쪽 래퍼들이 %폭이라 내용 폭 계산에
-      기여하지 않아 칸이 버튼보다 좁게 잡히고, 버튼이 칸 밖으로 삐져나와 옆 버튼과
-      겹쳤다(넓은 화면에서만 드러남). 칸에도 같은 px을 직접 준다. */
+
 {F5_ACTIONS}{{gap:8px;--f5-btn:208px;--f5-btn-fs:13px}}
 @media (max-width:1200px){{{F5_ACTIONS}{{--f5-btn:186px;--f5-btn-fs:12px}}}}
 @media (max-width:992px){{{F5_ACTIONS}{{--f5-btn:160px;--f5-btn-fs:11px}}}}
@@ -1227,9 +1009,9 @@ ul.reason-list li{{font-size:14px;padding:8px 0 8px 14px;border-bottom:1px dashe
 """, unsafe_allow_html=True)
 
 
-# ════════════════════════════════════════════════════════════
-# 화면 0 — 인트로
-# ════════════════════════════════════════════════════════════
+
+# 인트로
+
 FEATURES = [
     ("""<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4.5"/>
         <circle cx="12" cy="12" r="1.1" fill="#159A93" stroke="none"/>""",
@@ -1263,9 +1045,9 @@ def screen_intro():
         go(1)
 
 
-# ════════════════════════════════════════════════════════════
+
 # 화면 1~3 — 파일 업로드
-# ════════════════════════════════════════════════════════════
+
 UPLOAD_STEPS = {
     1: {"key": "org_intro", "title": "조직소개서 파일 업로드", "types": ["pptx", "pdf"],
         "tips": ["PPTX 파일만 지원합니다.",
@@ -1292,26 +1074,15 @@ def progress_bar(step: int) -> str:
 
 
 def screen_upload(step: int):
-    """1-1 ~ 1-3 파일 업로드. 파일 내용을 bytes로 보관해야 F1이 파싱할 수 있다.
-
-    ⚠️ 파일명만 저장하면 안 된다 (원래 코드의 문제). Streamlit의 UploadedFile은
-       rerun 때마다 새로 만들어지고, 한 번 읽으면 위치가 끝으로 가서 재사용이
-       안 된다. 그래서 여기서 bytes로 뽑아 세션에 넣는다.
-    """
+    
     cfg = UPLOAD_STEPS[step]
     st.markdown(progress_bar(step) + f'<p class="ob-step">STEP {step}</p>', unsafe_allow_html=True)
 
     saved = st.session_state.uploaded.get(cfg["key"])
     if saved:
-        # ⚠️ st.file_uploader를 다시 그리지 않는다.
-        #    Streamlit은 위젯이 그려지지 않은 rerun에서 그 위젯의 상태를 버린다.
-        #    STEP 3 → 4 → 이전으로 돌아오면 업로더가 비어 있게 되므로,
-        #    우리가 세션에 보관한 bytes로 같은 모양의 박스를 직접 그린다.
-        #    (새로고침하면 세션 자체가 새로 생겨 여기도 비게 된다 — 의도한 동작)
+        
         fname = st.session_state.files.get(cfg["key"], "")
-        # ✕는 <a>로 만든다. st.button은 박스 밖에만 놓을 수 있어서
-        # 원래 Streamlit 업로더처럼 칩 안에 넣을 수 없다.
-        # 이 앱은 이미 후보 카드에서 같은 쿼리 파라미터 방식을 쓴다.
+       .
         st.markdown(
             f'<div class="up-box"><div class="up-file">'
             f'<span class="up-doc"></span>'
@@ -1321,12 +1092,12 @@ def screen_upload(step: int):
             f'target="_self" title="파일 삭제">&times;</a>'
             f"</div></div>", unsafe_allow_html=True)
     else:
-        # 아이콘·제목은 CSS로 점선 박스 안에 그려진다 (inject_css의 upload_title)
+        
         up = st.file_uploader(cfg["title"], type=cfg["types"], key=f"up_{cfg['key']}",
                               label_visibility="collapsed")
         if up is not None:
             st.session_state.files[cfg["key"]] = up.name
-            st.session_state.uploaded[cfg["key"]] = up.getvalue()   # ← 내용 보관
+            st.session_state.uploaded[cfg["key"]] = up.getvalue()   
             st.session_state.pop("profile", None)   # 파일이 바뀌면 프로필 다시 생성
             st.rerun()
 
@@ -1343,9 +1114,9 @@ def screen_upload(step: int):
             go(step + 1)
 
 
-# ════════════════════════════════════════════════════════════
+
 # 화면 4 — 분석 완료
-# ════════════════════════════════════════════════════════════
+
 #   (세션 키, 미업로드 시 표시 이름, 파싱 성공 시 표시 문구)
 RESULT_ROWS = [
     ("org_intro", "조직소개서", "인력정보, 팀역량종합, 조직개요 추출 완료"),
@@ -1432,9 +1203,9 @@ def screen_done():
             go(5)
 
 
-# ════════════════════════════════════════════════════════════
+
 # 화면 5 — 대시보드
-# ════════════════════════════════════════════════════════════
+
 def radar_svg(scores: list, labels: list, maxes: list) -> str:
     """시장계열 3개 항목 레이더 (onboarding_final.html의 radarSVG와 동일한 방식)"""
     n = len(labels)
@@ -1575,14 +1346,7 @@ def _usd_label(v) -> str:
 
 
 def candidate_card(row, rank: int, picked: bool) -> str:
-    """순위 카드.
-
-    ⚠️ <a href="?pick=N">를 쓰면 안 된다. 링크는 페이지를 새로 로드하고,
-       그러면 Streamlit 세션이 새로 만들어져 st.session_state가 통째로 비워진다
-       (업로드한 조직 프로필까지 사라진다 — 실제로 2위 카드를 누르면
-       '조직 역량 프로필'이 F1 연결 대기로 돌아갔다).
-       대신 카드 위에 투명한 st.button을 겹쳐 두고 rerun으로 처리한다.
-    """
+   
     total = row["총점"]
     usd = _usd_label(row["시장규모_억달러"])
     den = row["배점합"]
@@ -1604,11 +1368,7 @@ def candidate_card(row, rank: int, picked: bool) -> str:
 
 
 def scorecard_table(row) -> str:
-    """8개 항목 스코어카드.
-
-    값이 None인 항목은 '평가 대상 없음'이다(예: 입력유형 역량을 전혀 요구하지 않는
-    사업). 0점으로 표시하면 '나쁨'으로 읽히므로 —로 두고 분모에서 뺀다.
-    """
+    
     body = ""
     for name, cap, part in ITEMS:
         val = row[name]
@@ -1625,14 +1385,7 @@ def scorecard_table(row) -> str:
 
 
 def build_score_reasons(sel) -> list:
-    """항목별 판단 근거 문장.
-
-    LLM을 쓰지 않는다 — 표준역량_정의.csv의 '근거'·'전이출처'·'전담인력' 컬럼과
-    DB 원문(시장규모·진입장벽수준·실제기업사례)에서 그대로 뽑아 조립한다.
-    숫자만 있던 '점수 산출 근거' 카드에 그 점수가 나온 이유를 붙이기 위한 것.
-
-    Returns: [(항목명, 근거 문장, 출처 태그), ...] — 평가되지 않은(None) 항목은 뺀다.
-    """
+    
     if not f3_2:
         return []
 
@@ -1708,11 +1461,7 @@ def build_score_reasons(sel) -> list:
 
 @st.dialog(" ")
 def _db_source_dialog(sel) -> None:
-    """'DB 원문보기' 팝업. st.dialog가 우상단 X를 기본 제공하므로 따로 안 만든다.
-
-    제목을 빈 문자열로 주면 안 열려서(ValueError) 공백 하나(" ")를 넣어
-    타이틀 바를 비워 보이게 한다.
-    """
+   
     db_rows = [
         ("설명", sel["설명"]),
         ("산업분류", sel["산업분류"]),
@@ -1727,11 +1476,7 @@ def _db_source_dialog(sel) -> None:
 
 
 def _find_empty_idea_tab() -> int:
-    """4필드가 전부 빈 탭 번호를 앞에서부터 찾는다. 없으면 새 탭을 만들어서 반환한다.
-
-    6C(F4-3) → 5A 연결 시 기존 작성 내용을 지우지 않으려고 쓴다 — 1탭부터
-    확인해서 비어 있는 첫 탭에 넣고, 전부 채워져 있으면 탭을 하나 늘린다.
-    """
+    
     count = st.session_state.get("idea_tab_count", 3)
     tab_data_all = st.session_state.get("idea_tab_data", {})
     for i in range(1, count + 1):
@@ -1744,27 +1489,13 @@ def _find_empty_idea_tab() -> int:
 
 
 def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
-    """아이디어 적합도 판단형 (핵심기능 2) — 5A → 6A → 7 → 8 → 9~11.
-
-    5A  F4-1  정형 입력 4필드 → 요구역량 명세 (로컬 임베딩 + 필요시 LLM 보완)
-    6A  F2-2  가장 가까운 DB 항목을 찾아 시장 데이터(시장규모·진입장벽)를 빌려온다
-    7   F3-4  요구역량 + 그 시장 데이터로 8개 항목 100점 채점
-    6A' F4-2  LLM이 전이 가능성까지 보고 판단 근거를 서술
-    9~11 F5   갭 리포트·보완전략·로드맵
-
-    탭 여러 개를 둬서(idea_active_tab) 아이디어를 새로 쓰거나 6C에서 넘어와도
-    이전 탭에서 작성·채점한 내용이 지워지지 않게 한다. 위젯 key와 결과 캐시
-    key를 전부 탭 번호로 구분해서, 탭마다 독립된 세션처럼 동작한다.
-    """
+    
     st.session_state.setdefault("idea_tab_count", 3)
     st.session_state.setdefault("idea_active_tab", 1)
     tab_count = st.session_state["idea_tab_count"]
     active_tab = st.session_state["idea_active_tab"]
 
-    # ── 탭 줄 — 카드 '위' 오른쪽에 얹는다 (브라우저 탭처럼) ──
-    # 예전엔 카드 안에서 배지 옆에 뒀는데, 입력 폼 폭을 깎아먹고 배지와 높이도
-    # 안 맞았다. 카드 바깥 위로 빼면 '이 카드가 여러 장 중 하나'라는 게 바로 읽힌다.
-    # 뒤따르는 stHorizontalBlock을 CSS로 찾기 위한 표식(화면엔 안 보인다).
+    
     st.markdown('<span class="idea-tabs-marker" style="display:none"></span>',
                 unsafe_allow_html=True)
     tab_btn_cols = st.columns(tab_count + 1)
@@ -1790,18 +1521,12 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
         st.markdown('<span class="form-badge">아이디어를 작성해주세요.</span>',
                     unsafe_allow_html=True)
 
-        # Streamlit은 위젯이 이번 실행에서 렌더링되지 않으면(=다른 탭을 보고 있으면)
-        # 그 key의 session_state를 지워버린다("위젯이 스크립트에서 빠지면 상태도
-        # 사라진다" — 실측으로 확인함, 2026-08-06). key만 믿으면 탭을 옮겼다가
-        # 돌아왔을 때 입력이 사라진다. 그래서 위젯과 별개로 idea_tab_data에
-        # 직접 값을 들고 있다가, 위젯을 그릴 때마다 value=로 재주입한다.
+        
         st.session_state.setdefault("idea_tab_data", {})
         tab_data = st.session_state["idea_tab_data"].setdefault(
             active_tab, {"industry": "", "market": "", "problem": "", "customer": ""})
 
-        # value=로 예시를 박아 두면 사용자가 안 쓴 문장이 이미 채워져 있어서
-        # 자기 아이디어를 채점한 결과인지 데모인지 구분할 수 없으므로,
-        # placeholder는 그대로 두고 value만 탭별 저장값으로 재주입한다.
+        
         c1, c2 = st.columns(2)
         with c1:
             industry = st.text_input(
@@ -1847,16 +1572,12 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
                   "market": market, "customer": customer}
 
     req_key = f"idea_req_{active_tab}"
-    # 채점은 '적합도 판단하기'를 눌렀을 때만 돈다. 6C(F4-3)에서 넘어오면 요구역량이
-    # 미리 채워진 채로 도착하는데, 예전엔 그것만으로 화면 진입 즉시 채점이 시작돼서
-    # 버튼을 누르지도 않았는데 도는 것처럼 보였다(2026-08-11).
+   
     run_key = f"idea_run_{active_tab}"
 
     if run:
         prev = st.session_state.get(req_key)
-        # 6C에서 넘어온 요구역량(F4-3 판단)은 폼 내용이 그때와 같으면 그대로 쓴다.
-        # F4-1을 다시 태우면 조직이 이미 가진 역량이 순환 재검출돼 역량전이가능성이
-        # 0점으로 깔린다 — F4-3 결과를 재사용하는 이유와 같다.
+        
         if not (prev and prev.get("input") == user_input):
             with st.spinner("요구역량 추출 중… (최초 1회는 임베딩 모델 로딩으로 오래 걸립니다)"):
                 try:
@@ -1882,22 +1603,17 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
 </div>""", unsafe_allow_html=True)
         return
 
-    # ── 7A F4-4로 채점 (조직계열=F3-2 그대로, 시장계열=LLM 추정 + F2-5 공식) ──
-    # F4-1이 F3-2와 같은 표준역량 축(CAP_*)을 직접 반환한다.
+    
     req_names = req["required_capability_names"]
     std_ids = req["required_capability_ids"]
     unmatched_caps = req.get("unmatched_capabilities") or []
     idea_context = {"industry": industry, "problem": problem, "market": market, "customer": customer}
 
-    # ⚠️ 캐시 필수 — 안 하면 다른 탭 갔다 오는 것처럼 이 화면이 한 번이라도
-    # 다시 그려질 때마다(=Streamlit rerun마다) LLM 시장 추정을 또 부르게 된다.
-    # 매번 값이 달라지니(LLM 비결정성) "결과가 사라진다/바뀐다"로 보이고, API도
-    # 계속 소모된다(2026-08-06 확인). "적합도 판단하기"를 다시 누르기 전까진
-    # 같은 탭에서는 한 번 계산한 채점을 그대로 재사용한다.
+    
     score_key = f"idea_score_{active_tab}"
     if score_key not in st.session_state:
         if not st.session_state.get(run_key):
-            # 요구역량만 채워진 상태(6C에서 넘어옴) — 버튼을 눌러야 채점을 시작한다.
+            
             st.markdown("""
 <div class="note-card wait">
   <p class="section-title">요구역량 명세</p>
@@ -1930,8 +1646,7 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
         market_est = {}
         transfer_bonus = {"applied": False}
 
-    # scorecard_table·render_gap_report가 쓰는 필드를 갖춘 행으로 만든다.
-    # 시장규모·진입장벽은 DB 실측이 아니라 AI 추정치다 — 화면에서 그렇게 표시한다.
+    
     sel = pd.Series({
         **{n: scores.get(n) for n, _, _ in ITEMS},
         "아이디어ID": f"idea_input_{active_tab}", "아이디어명": f"{industry} · {problem[:30]}",
@@ -1990,7 +1705,7 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
         st.session_state.pop(score_key, None)
         st.rerun()
 
-    # ── 요구역량 명세 + 판단 근거 ──
+    
     left, right = st.columns([1, 1])
     with left:
         chips = "".join(
@@ -2004,8 +1719,7 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
             '표준 목록에 없는 역량(AI 판단) · '
             + html.escape(", ".join(unmatched_caps)) + "</p>"
         ) if unmatched_caps else ""
-        # min-height는 레이더가 읽힐 만한 크기를 보장한다. 두 카드 모두 eq-card라
-        # 내용이 더 많은 쪽 높이에 맞춰 함께 늘어난다(둘은 항상 같은 높이).
+        
         st.markdown(f"""
 <div class="canvaswrap eq-card" style="min-height:330px">
   <p class="section-title">요구역량 명세</p>
@@ -2015,8 +1729,7 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
   {unmatched_note}
 </div>""", unsafe_allow_html=True)
     with right:
-        # 레이더는 .radar-wrap으로 감싸야 카드 높이를 끌어올리지 않고 카드에 맞춰 늘어난다
-        # (역량 기반 추천형의 '점수 분포' 카드와 같은 구조)
+        
         rad = [(n, m) for n, m, _ in ITEMS if sel[n] is not None and not pd.isna(sel[n])]
         st.markdown(f'<div class="canvaswrap eq-card" style="min-height:330px">'
                     f'<p class="section-title">{len(rad)}개 항목 점수 분포</p>'
@@ -2063,8 +1776,7 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
 
     ranked = saved["ranked_candidates"]
     top = ranked[0] if ranked else {}
-    # 파트 번호 배지(F4-2)는 뺀다. 다만 LLM이 실제로 돌지 않았을 때는
-    # 아래 문장이 LLM 판단이 아니라는 뜻이므로 그 사실만 남긴다.
+    
     fallback = "" if saved["used_llm"] else (
         '<p class="csub" style="margin-top:6px;color:var(--warn)">'
         'LLM 미사용 — 점수 순서를 그대로 유지했습니다.</p>')
@@ -2083,12 +1795,7 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
 
 
 def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candidates: pd.DataFrame) -> None:
-    """6B 후반 — DB 밖 신규 후보 LLM 제안 (F4-3).
-
-    DB 50건에 없는 아이디어라 점수 척도(시장규모·진입장벽)가 없다. 그래서 순위에
-    섞지 않고 별도 카드로 보여준다. F4-3이 required_capability_names를 주므로
-    나중에 F3-2로 조직계열 점수만 따로 낼 수는 있다.
-    """
+   
     if not f4_3 or not profile:
         return
 
@@ -2096,7 +1803,7 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
     saved = st.session_state.get(key)
 
     with st.container(border=True):
-        # 이 카드를 CSS에서 찾기 위한 표식 (화면에는 안 보인다)
+        
         st.markdown('<span class="newcand-marker" style="display:none"></span>',
                     unsafe_allow_html=True)
 
@@ -2136,8 +1843,7 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
 <p class="section-title">LLM추천 후보 {len(saved["new_candidates"])}건</p>
 <p class="csub" style="margin-bottom:10px">{_safe_llm_text(strip_evidence_ids(saved.get("overall_summary", "")))}</p>
 """, unsafe_allow_html=True)
-            # 카드마다 버튼을 붙여야 해서(raw HTML엔 st.button을 못 심는다)
-            # 카드 하나씩 개별 렌더링으로 바꿨다 — 이전엔 전부 합쳐서 한 번에 그렸었다.
+            
             for c in saved["new_candidates"]:
                 caps = ", ".join(c.get("required_capability_names", []))
                 ev = c.get("cited_evidence_ids") or []
@@ -2152,15 +1858,7 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
                     f'{f" · 근거 {len(ev)}건" if ev else ""}</p>'
                     f"</div></div>", unsafe_allow_html=True)
                 if st.button("이 아이디어로 적합도 판단하기", key=f"use_new_{c['id']}"):
-                    # 6C(F4-3) → 5A(F4-1 입력 폼)로 이어주기.
-                    #
-                    # 예전엔 F4-3의 required_capability_ids를 버리고 description만 넘겨서
-                    # F4-1이 처음부터 다시 추출하게 했다. 근데 F4-3의 description 자체가
-                    # "조직 역량을 근거로" 쓰인 문장이라, 그걸 F4-1이 다시 추출하면 조직이
-                    # 이미 가진 역량이 순환적으로 재검출돼 역량전이가능성이 자주 0점으로
-                    # 나오는 문제가 있었다(2026-08-10 확인). 지금은 F4-1·F4-3이 같은
-                    # 표준역량 32개 축을 쓰므로, F4-3의 판단을 버리지 않고 그대로 재사용한다
-                    # — F4-1을 다시 태우지 않고 F4-1의 출력 형태만 그대로 흉내낸다.
+                    
                     target_tab = _find_empty_idea_tab()
                     st.session_state.setdefault("idea_tab_data", {})[target_tab] = {
                         "industry": c.get("target_industry", ""),
@@ -2168,8 +1866,7 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
                         "problem": c["description"],
                         "customer": c.get("target_customer", ""),
                     }
-                    # 위젯이 이번 실행에서 안 그려진 탭은 key가 지워져 있을 수 있는데,
-                    # 혹시 남아있는 값이 있으면 value=보다 그게 우선시될 수 있으니 같이 지운다.
+                    
                     for field in ("industry", "market", "problem", "customer"):
                         st.session_state.pop(f"idea_{field}_{target_tab}", None)
 
@@ -2189,18 +1886,16 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
                         ],
                         "required_capability_ids": cand_ids,
                         "required_capability_names": cand_names,
-                        # F4-3은 required_capability_ids를 32개 표준역량 enum으로만 답하므로
-                        # (스키마 제약) 목록 밖 역량 개념이 애초에 없다 — 항상 빈 리스트.
+                        
                         "unmatched_capabilities": [],
                         "confidence": "high",
                         "used_llm_fallback": False,
                         "llm_rationale": None,
                     }
-                    # 새로 채웠으니 이전 채점(캐시)이 있었다면 버려서 다시 계산하게 한다.
+                    
                     st.session_state.pop(f"idea_score_{target_tab}", None)
                     st.session_state.pop(f"idea_judgment_{target_tab}", None)
-                    # 채점은 사용자가 '적합도 판단하기'를 누른 뒤에 시작한다 — 이 탭을
-                    # 전에 채점한 적이 있어도 자동으로 다시 돌지 않게 요청 표시를 지운다.
+                    
                     st.session_state.pop(f"idea_run_{target_tab}", None)
 
                     st.session_state["idea_active_tab"] = target_tab
@@ -2213,11 +1908,7 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
 
 
 def missing_cap_names(sel) -> list:
-    """9단계 부족 역량 — F3-1 차집합 결과(F3-2가 계산)를 사람이 읽는 이름으로.
-
-    F3-2의 matched/missing은 'CAP_3D' 같은 표준역량ID다. 그대로 F5 프롬프트나
-    화면에 넘기면 사용자가 못 읽으므로 cap_names()로 변환한다.
-    """
+   
     ids = list(sel["missing"]) if sel["missing"] is not None else []
     if f3_2 and ids:
         return f3_2.cap_names(ids)
@@ -2242,12 +1933,7 @@ def _safe_cell(sel, key, default=None):
 def _build_f5_category_details(
     sel, org_ctx: dict, diagnosis_mode: str = "capability_recommendation"
 ) -> dict:
-    """점수 엔진이 만든 17개 세부점수를 F5 읽기 전용 입력으로 조립한다.
-
-    조직계열은 F3-2가 반환한 sub_scores를 그대로 사용하고, 시장계열은
-    F2-5의 실제 산식을 다시 호출해 DB 부분과 F 사업화 부분을 분리한다.
-    data_status는 F5가 이 값의 존재 여부만 보고 파이썬에서 결정한다.
-    """
+    
     raw_org = _safe_cell(sel, "sub_scores", {})
     raw_org = raw_org if isinstance(raw_org, dict) else {}
     org_sub_caps = f3_2.SUB_CAPS if f3_2 else {}
@@ -2370,7 +2056,7 @@ def _nonfull_score_categories(sel) -> list[str]:
 def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                       key_prefix: str = "gap",
                       diagnosis_mode: str = "capability_recommendation") -> None:
-    """9~11단계 — 새 F5 구조화 리포트를 클릭형 화면으로 표시한다."""
+    
     if not f5 or not profile:
         st.markdown("""
 <div class="note-card wait">
@@ -2382,7 +2068,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     missing_caps = missing_cap_names(sel)
     nonfull_categories = _nonfull_score_categories(sel)
     idea_id = str(sel["아이디어ID"])
-    # F5 문장 생성 계약이 바뀌면 키도 바꿔 이전 세션의 낡은 리포트를 재사용하지 않는다.
+    
     report_key = f"{key_prefix}_report_f5_luna_v8_{diagnosis_mode}_{idea_id}"
     gap_report, gap_error = st.session_state.get(report_key, (None, None))
 
@@ -2416,9 +2102,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
   <p class="csub">현재 {sel['획득']:.1f}점 / 목표 {target:.0f}점 기준으로
     보완전략(Build·Buy·Partner·Hire)과 단기·중기·장기 로드맵을 생성합니다.</p>
 </div>""", unsafe_allow_html=True)
-        # 생성 중에는 버튼을 '갭 리포트 생성 중…'으로 바꿔 끼운다. st.empty()에
-        # 다시 그리면 버튼이 있던 자리가 그대로 교체돼서, 버튼과 진행표시가
-        # 위아래로 같이 보이지 않는다(중복으로 눌리는 것도 막힌다).
+       
         gen_slot = st.empty()
         if gen_slot.button("AI 갭 리포트 생성", key=f"gen_{report_key}"):
             idea_context = _build_f5_idea_context(sel)
@@ -2512,8 +2196,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     if len(gaps) > 2:
         gap_preview += f" 외 {len(gaps) - 2}개"
 
-    # 제목과 다운로드를 한 줄에 배치한다. PDF는 이미 생성된 결과만 변환하므로
-    # 버튼을 눌러도 LLM이나 외부 API를 다시 호출하지 않는다.
+  
     subject_name = str(_safe_cell(sel, "아이디어명", "진단대상") or "진단대상")
     filename_part = _download_filename_part(subject_name)
     pdf_export = None
@@ -2545,7 +2228,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
             short_term.get("headline") or short_term.get("objective", "실행계획 확인"),
         ),
     ]
-    # eq-card를 붙여 3장의 높이를 항상 같게 만든다(설명 길이가 카드마다 다르다).
+    
     for index, (column, (label, value, subtext)) in enumerate(
             zip(overview_cols, overview_cards)):
         with column:
@@ -2567,12 +2250,11 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
         f'<p class="f5-judgment-text">{_safe_llm_text(view["headline"])}</p></div>',
         unsafe_allow_html=True,
     )
-    # PDF 저장·전문 보기는 종합 판단 바로 아래에 나란히 둔다. PDF는 이미 생성된
-    # 결과만 변환하므로 눌러도 LLM이나 외부 API를 다시 호출하지 않는다.
+    
     summary_key = f"f5_show_summary_{report_key}"
-    # 뒤따르는 버튼 줄을 CSS로 집기 위한 표식(화면엔 안 보인다).
+    
     st.markdown('<span class="f5-actions-anchor"></span>', unsafe_allow_html=True)
-    # 폭 배분은 CSS가 '내용 폭'으로 덮어쓴다 — 세 번째 칸은 남는 자리를 받는 용도.
+    
     btn_pdf, btn_summary, _btn_rest = st.columns([1, 1, 3])
     with btn_pdf:
         if pdf_export is not None:
@@ -2583,9 +2265,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 mime="application/pdf",
                 key=f"download_pdf_{report_key}",
                 type="primary",
-                # use_container_width는 쓰지 않는다 — 래퍼가 width:100%가 되면서
-                # 칸의 내용 폭 계산이 0으로 무너져 버튼이 칸 밖으로 삐져나왔다.
-                # 폭은 위 CSS(--f5-btn)가 칸과 버튼에 같이 지정한다.
+                
                 help="현재 화면의 전체 분석 내용을 한글 PDF 보고서로 저장합니다.",
             )
     with btn_summary:
@@ -2607,9 +2287,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
             '<p class="f5-section-lead">카드에서는 핵심 결론만 확인하고, 상세 분석에서 세부항목별 판단과 보완점을 볼 수 있습니다.</p>',
             unsafe_allow_html=True,
         )
-        # 손봐야 할 항목이 위로 오게 정렬한다: 우선 보완 → 보완 필요 → 점검 권장
-        # → 강점 유지 → 미평가. sorted()는 안정 정렬이라 같은 등급 안에서는
-        # F5가 준 원래 순서(배점 순)가 그대로 유지된다.
+        
         priority_rank = {"high": 0, "medium": 1, "low": 2, "maintain": 3, "unscored": 4}
         ordered_categories = sorted(
             view["categories"],
@@ -2637,8 +2315,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                         unsafe_allow_html=True,
                     )
                     with st.expander("자세히 보기"):
-                        # 다른 세 탭과 같은 '라벨 : 본문' 줄글로 통일한다.
-                        # (표로 두면 이 탭만 형식이 달라 보이고 좁은 칸에서 글이 눌렸다)
+                        
                         body = (f'<p class="f5-detail-lead">'
                                 f'{_safe_llm_text(_brief(category, "summary"))}</p>')
                         for sub in category["subitem_analysis"]:
@@ -2759,7 +2436,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                             + "</div>",
                             unsafe_allow_html=True)
 
-    # 바로 위 카드에 붙어 보여서 한 칸 띄운다(표식은 화면에 안 보인다).
+    
     st.markdown('<span class="f5-regen-anchor"></span>', unsafe_allow_html=True)
     if st.button("다시 생성", key=f"regen_{report_key}"):
         st.session_state.pop(report_key, None)
@@ -2773,10 +2450,7 @@ def screen_dashboard():
     org_levels = apply_org_levels(profile)
     db = load_scored_db(org_ctx, org_levels)
 
-    # ── 헤더: 로고+타이틀(왼쪽) / 탭(오른쪽) ──
-    # 탭 쪽을 넓게 준다. 창을 최대화하지 않으면 오른쪽 칸이 두 버튼의 글자 폭보다
-    # 좁아져서 버튼끼리 겹쳐 보였다(2026-08-09). 폭 배분 + CSS(자동 폭 컬럼 +
-    # 화면 폭별 글씨 축소) 두 가지로 같이 막는다.
+    
     head_l, head_r = st.columns([1.85, 2.15], vertical_alignment="center")
     with head_l:
         st.markdown(f"""
@@ -2799,18 +2473,18 @@ def screen_dashboard():
 
     st.markdown('<hr class="top-line">', unsafe_allow_html=True)
 
-    # ── 조직 프로필 요약 (F1) ──
+    # ── 조직 프로필 요약  ──
     render_org_summary(profile)
 
     if st.session_state.tab == "f2":
         render_idea_tab(db, profile, org_ctx)
         return
 
-    # ── 8단계 실행 가능성 평가 (F3-3) → 통과한 후보만 Top-3 ──
+    # ── 8단계 실행 가능성 평가  → 통과한 후보만 Top-3 ──
     scanned = feasibility_pass(db)
     dropped = scanned[~scanned["feasible"]]
     passed = scanned[scanned["feasible"]]
-    if passed.empty:          # 전부 탈락하면 필터를 알리고 원본으로 보여준다
+    if passed.empty:          
         passed = scanned
     results = retrieve_business_candidates(passed, "", top_k=3)
     picked = min(st.session_state.picked, len(results) - 1)
@@ -2827,19 +2501,14 @@ def screen_dashboard():
     for i, (col, (_, row)) in enumerate(zip(cols, results.iterrows())):
         with col:
             st.markdown(candidate_card(row, i + 1, i == picked), unsafe_allow_html=True)
-            # 카드 전체를 덮는 투명 버튼 (CSS가 opacity:0으로 카드 위에 겹친다).
-            # 링크가 아니라 버튼이라 rerun만 일어나고 세션이 유지된다.
+            
             if st.button(f"{i + 1}위 선택", key=f"pick_{i}"):
                 st.session_state.picked = i
                 st.rerun()
 
     sel = results.iloc[picked]
 
-    # ── 스코어카드 ──
-    # 제목 / 버튼 / 표를 각각 따로 그린다. 한 markdown에 묶으면 'DB 원문보기'를
-    # 제목 텍스트 바로 옆에 붙일 수 없다(버튼은 별도 요소라 같은 문단에 못 들어간다).
-    # CSS가 이 세로 블록을 줄바꿈되는 flex 행으로 만들어 제목·버튼을 한 줄에 놓고,
-    # 표는 width:100%로 다음 줄로 흘린다.
+   
     with st.container(border=True):
         st.markdown('<span class="scorecard-marker" style="display:none"></span>',
                     unsafe_allow_html=True)
@@ -2877,7 +2546,7 @@ def screen_dashboard():
       <div class="canvaswrap" style="flex: 1; margin: 0; display: flex; flex-direction: column;">
         <p class="section-title">{len(rad)}개 항목 점수 분포</p>
         <div style="flex: 1; display: flex; align-items: center; justify-content: center; min-height: 250px;">
-          <!-- 🚨 핵심 수정: 그래프가 260px 이상 폭주하지 못하도록 족쇄 래퍼로 가둡니다 -->
+          <!-- 핵심 수정: 그래프가 260px 이상 폭주하지 못하도록 족쇄 래퍼로 가둡니다 -->
           <div style="width: 100%; max-width: 260px; max-height: 260px; display: flex; justify-content: center;">
             {svg_code}
           </div>
@@ -2906,9 +2575,9 @@ def screen_dashboard():
         go(0)
 
 
-# ════════════════════════════════════════════════════════════
+
 # 라우팅
-# ════════════════════════════════════════════════════════════
+
 def go(n: int):
     st.session_state.screen = max(0, min(5, n))
     st.rerun()
@@ -2917,20 +2586,19 @@ def go(n: int):
 def main():
     st.session_state.setdefault("screen", 0)
     st.session_state.setdefault("files", {})
-    st.session_state.setdefault("uploaded", {})   # key → bytes (F1 파싱용)
+    st.session_state.setdefault("uploaded", {})   # key → bytes 
     st.session_state.setdefault("picked", 0)
     st.session_state.setdefault("tab", "f1")
 
-    # 링크(<a>) 클릭은 페이지가 새로 로드되면서 세션이 초기화되므로,
-    # 어떤 화면/어떤 후보였는지를 쿼리 파라미터로 넘겨받아 복원한다.
+    
     qp = st.query_params
-    if qp.get("dev") == "1":                    # ?dev=1 → samples/로 개발용 실행
+    if qp.get("dev") == "1":                    
         st.session_state["dev_samples"] = True
-    if qp.get("clear"):                         # 업로드 칩의 ✕ 클릭
+    if qp.get("clear"):                         
         key = qp["clear"]
         st.session_state.get("uploaded", {}).pop(key, None)
         st.session_state.get("files", {}).pop(key, None)
-        st.session_state.pop("profile", None)   # 파일이 바뀌면 프로필도 다시 만든다
+        st.session_state.pop("profile", None)  
     if qp.get("home"):
         st.query_params.clear()
         st.session_state.screen = 0
@@ -2945,8 +2613,7 @@ def main():
 
     screen = st.session_state.screen
     step_cfg = UPLOAD_STEPS.get(screen)
-    # 업로드 여부는 위젯 상태가 아니라 우리가 보관한 bytes로 판단한다.
-    # 위젯 상태는 화면을 벗어나면 Streamlit이 버리기 때문이다.
+    
     inject_css(
         screen,
         step_cfg["title"] if step_cfg else "",
