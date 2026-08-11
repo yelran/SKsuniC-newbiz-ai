@@ -1074,11 +1074,10 @@ def progress_bar(step: int) -> str:
 
 
 def screen_upload(step: int):
-    
     cfg = UPLOAD_STEPS[step]
     st.markdown(progress_bar(step) + f'<p class="ob-step">STEP {step}</p>', unsafe_allow_html=True)
 
-       saved = st.session_state.uploaded.get(cfg["key"])
+    saved = st.session_state.uploaded.get(cfg["key"])
     if saved:
         fname = st.session_state.files.get(cfg["key"], "")
 
