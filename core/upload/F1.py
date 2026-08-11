@@ -1,44 +1,3 @@
-"""
-F1. 조직 데이터 파싱 및 역량 프로필 생성  (개정판)
-==================================================
-
-조직소개서(pptx) · 인력정보/특허목록(xlsx)을 받아 표준화된 조직 역량 프로필 JSON을 만든다.
-
-■ 원본에서 고친 것 6건
-  ① org_context 플래그가 pptx 문자열 검색에만 의존해 조용히 False가 되었다.
-     실측: pptx 파싱 실패 시 inference_speed_ok·has_commercialization_experience가 False.
-     그런데 근거는 xlsx에 다 있다 ('30초 내 웹 응답' → 6.팀역량종합,
-     '엑스칼리버 국내 최초 상용화' → 1.조직개요).
-     → xlsx를 1순위, pptx를 보조 근거로 바꿨다. 각 플래그의 판정 출처를 함께 남긴다.
-     ※ has_commercialization_experience가 False면 F2-5에서 진입장벽 F 5점 +
-       사업성 F 4점 = 9점이 사라진다.
-
-  ② `from pptx import Presentation`이 모듈 최상단에 있어 python-pptx가 없으면
-     모듈 자체가 import 실패했다 ('파일 하나 없어도 안 죽음'이 커버 못 하는 경우).
-     → 함수 안으로 옮겨 지연 import 했다.
-
-  ③ capabilities에 보유수준(★)이 없어 F3가 쓸 수 없었다.
-     → 6.팀역량종합의 '점수' 컬럼(0~5)을 읽어 level 필드로 넣는다.
-
-  ④ 특허 미반영 역량을 담당영역 키워드 3개로만 찾아 임상검증 등이 누락됐다.
-     → 5.개인별역량의 '특허 미반영 보유 역량' 컬럼도 읽는다.
-
-  ⑤ patent_applied_industries가 F3에서 쓸 수 없는 값이었다.
-     ['수의영상진단'] 하나만 나오는데, F3-2는 target_industry(후보 산업)와
-     비교하므로 절대 매칭되지 않았다.
-     → F3-2 개정판에서 해당 로직을 폐기했다. 이 필드는 리포트용으로만 남긴다.
-
-  ⑥ F3가 쓰는 표준역량ID(CAP_*)와 어휘가 갈렸다.
-     → standard_capability_levels로 변환해 함께 출력한다.
-
-■ 원본에서 유지한 것 (판단이 맞았음)
-  · _find_header_row의 exact match — 부분 일치는 부제목에 낚인다
-  · has_relevant_patent·target_industry를 org_context에서 제외 — 후보에 따라 달라지는 값이다
-  · 원본 특허 엑셀(5블록, 분류 없음) 대신 분류가 정리된 시트를 쓴 것
-
-실행: python F1.py
-"""
-
 import io
 import json
 import sys
@@ -46,31 +5,25 @@ from pathlib import Path
 
 import pandas as pd
 
-BASE = Path(__file__).resolve().parent          # app/core/upload/
+BASE = Path(__file__).resolve().parent          
 
 
 def _find_dir(name: str) -> Path:
-    """data · samples 폴더를 찾는다.
-
-    ⚠️ BASE.parent/name으로 고정하면 안 된다. F1이 app/upload/에서 app/core/upload/로
-       옮겨지면서 그 경로가 app/core/data를 가리키게 됐고, 폴더가 없으니 CSV 로드가
-       조용히 건너뛰어졌다(표준역량 검증·특허분류 매핑이 전부 무효화됨).
-       에러가 안 나서 알아채기 어렵다 → 상위 폴더를 훑고, 못 찾으면 첫 후보를 돌려준다.
-    """
-    for p in (BASE.parent / name,           # core/ 옆
-              BASE.parent.parent / name,    # app/ 옆  (현재 구조)
+    
+    for p in (BASE.parent / name,           
+              BASE.parent.parent / name,   
               BASE / name):
         if p.is_dir():
             return p
     return BASE.parent / name
 
 
-DATA_DIR = _find_dir("data")            # 표준역량_정의.csv · 역량어휘_매핑.csv
-SAMPLES_DIR = _find_dir("samples")      # 개발용 조직 데이터 (없어도 된다)
+DATA_DIR = _find_dir("data")            
+SAMPLES_DIR = _find_dir("samples")      
 
 
 # ---------------------------------------------------------------
-# 1. capability 정의 — 6.팀역량종합 시트의 10개 카테고리
+# 1. capability 정의
 # ---------------------------------------------------------------
 CAPABILITY_DEFINITIONS = [
     {"capability_id": "cap_001", "name": "의료·수의 영상 AI(진단/검출)", "patent_classes": ["A", "C"]},
@@ -80,9 +33,7 @@ CAPABILITY_DEFINITIONS = [
     {"capability_id": "cap_005", "name": "멀티모달 학습",               "patent_classes": ["F"]},
     {"capability_id": "cap_006", "name": "위치기반·모빌리티",           "patent_classes": ["I"]},
     {"capability_id": "cap_007", "name": "바이오/오믹스 분석",          "patent_classes": ["H"]},
-    # ⚠️ staff_keyword는 좁게 잡는다. '수의'만 쓰면 강태우('산학협력(수의대 컨소시엄)')와
-    #    오재혁('수의 문헌 임베딩')까지 걸려 수의 도메인 지식 보유자로 잘못 잡힌다.
-    #    실제 수의 도메인 지식 보유자는 노다혜(수의사 면허)뿐이다.
+    
     {"capability_id": "cap_008", "name": "수의 도메인 지식", "level_fallback": 4,
      "patent_classes": [],
      "staff_keyword": ["수의사 면허", "수의학과", "수의영상의학"]},
@@ -90,18 +41,13 @@ CAPABILITY_DEFINITIONS = [
      "staff_keyword": ["MLOps", "경량화", "서빙", "Triton", "저지연"]},
     {"capability_id": "cap_010", "name": "LLM·RAG", "patent_classes": [],
      "staff_keyword": ["LLM", "RAG", "벡터DB", "프롬프트"]},
-    # ④ 추가 — 5.개인별역량의 '특허 미반영 보유 역량'에 있으나 원본이 놓친 역량
-    #    6.팀역량종합에 없는 카테고리라 ★를 읽을 수 없어 level_fallback으로 명시한다.
-    #    '판독'은 임하늘의 'XAI 판독근거 시각화'까지 걸려 제외했다.
+    
     {"capability_id": "cap_011", "name": "임상 검증·판독 품질관리", "level_fallback": 3,
      "patent_classes": [],
      "staff_keyword": ["임상 검증", "임상검증", "임상시험", "Ground Truth"]},
 ]
 
-# ⑥ F1 capability → F3 표준역량ID
-#   F1은 6.팀역량종합의 10개 카테고리를 쓰고, F3는 신사업DB 태그 177개를 커버하는
-#   표준역량 32개를 쓴다. 일부는 1:N으로 갈린다.
-#   'derived' = 6.팀역량종합의 ★를 그대로 쓴 값 / 'judged' = 세분화 시 판단으로 정한 값
+
 STANDARD_CAP_MAP = {
     "cap_001": [("CAP_VISION", "derived"), ("CAP_DETECT", "derived"),
                 ("CAP_CLASSIFY", "judged")],    # A분류를 진단/검출/분류로 세분
@@ -125,14 +71,7 @@ JUDGED_LEVEL = {"CAP_CLASSIFY": 4, "CAP_VIZ": 1, "CAP_EDGE": 2, "CAP_CLINICAL": 
 # ---------------------------------------------------------------
 
 def as_bytes(src) -> bytes:
-    """경로 문자열 · Path · 업로드 파일 객체를 모두 bytes로 통일한다.
-
-    ⚠️ 왜 필요한가 — Streamlit의 UploadedFile은 읽으면 위치가 끝으로 가서
-       두 번째 read()부터 빈 데이터가 된다. F1은 같은 xlsx를 시트별로
-       5번(1.조직개요·2.조직원·3.특허목록·5.개인별역량·6.팀역량종합) 읽고,
-       각 시트마다 _find_header_row가 한 번 더 읽으므로 총 10회쯤 접근한다.
-       bytes로 한 번 받아두고 읽을 때마다 새 BytesIO를 만들어야 한다.
-    """
+    
     if isinstance(src, (bytes, bytearray)):
         return bytes(src)
     if hasattr(src, "read"):                     # UploadedFile · BytesIO 등
@@ -188,27 +127,14 @@ def _parse_sheet(src, sheet_name: str, marker: str, dropna_col: str) -> pd.DataF
 
 
 def parse_staff_excel(src) -> pd.DataFrame:
-    """2.조직원 — 인력 목록.
-
-    ⚠️ 시트 아래쪽의 각주 행을 걸러낸다. '이름' 컬럼에 값이 있어서
-       dropna로는 안 빠지지만 사람이 아니다.
-         '* 특허 건수는 중복 제거한 고유 건수 …'
-         '* 특허 0건인 5명은 원본 자료에 대표발명자로 미포함 …'
-       그대로 두면 인원이 10명 → 12명으로 잡힌다.
-    """
+    
     df = _parse_sheet(src, "2.조직원", "이름", "이름")
     name = df["이름"].astype(str).str.strip()
     is_note = name.str.startswith(("*", "※", "-", "#")) | (name.str.len() > 20)
     return df[~is_note].copy()
 
 
-# ── 특허 분류 추정 규칙 (1-3) ──────────────────────────────────────
-#   업로드된 특허 파일에 '분류' 컬럼이 없을 때 발명의 명칭·요약으로 A~I를 추정한다.
-#   순서가 중요하다 — 위에서부터 먼저 걸린 분류를 쓴다.
-#   정확도: 우리 양식의 35건을 정답으로 두고 측정 34/35 (97%).
-#   ⚠️ 추정값이므로 evidence에 inferred=True로 표시한다.
-#   순서가 앞선 규칙이 이긴다. 고유 키워드를 먼저, 흔한 단어를 나중에 둔다.
-#   ('검출'은 여러 분류에 나오므로 C는 고유 표현만 쓰고 뒤로 보낸다)
+
 PATENT_CLASS_RULES = [
     ("H.바이오마커", ["바이오 마커", "바이오마커"]),
     ("E.촬영 보조", ["자세 교정"]),
@@ -225,12 +151,7 @@ PATENT_CLASS_RULES = [
 
 
 def infer_patent_class(title: str, summary: str = "") -> str:
-    """발명의 명칭·요약에서 특허 분류(A~I)를 추정한다. 못 찾으면 None.
-
-    명칭을 먼저 보고, 명칭으로 안 잡히면 요약을 본다.
-    요약을 함께 넣고 한 번에 매칭하면 요약의 부수적 단어가 이긴다
-    (예: '라벨 오류 검출' 특허의 요약에 '결석'이 나와 C로 잘못 분류됐다).
-    """
+    
     for text in (title, f"{title} {summary}"):
         for cls, keywords in PATENT_CLASS_RULES:
             if any(k in text for k in keywords):
@@ -247,16 +168,7 @@ def _find_col(df: pd.DataFrame, *keywords) -> str:
 
 
 def parse_patent_excel(src) -> pd.DataFrame:
-    """특허 목록을 읽는다. 두 형태를 모두 받는다.
-
-    ① 우리 양식 — '3.특허목록' 시트, '분류'(A~I)·'발명의 명칭'·'요약' 컬럼
-    ② 원본 특허 파일 — 시트 이름 임의, '분류' 컬럼 없음
-       (예: digital healthcare팀_특허_보안해제.xlsx → Sheet1에 발명의명칭·요약만)
-
-    ②일 때는 infer_patent_class()로 분류를 추정하고 '분류추정' 컬럼을 True로 둔다.
-    ⚠️ 원본 파일은 '순번이 5회 리셋되는 5블록' 구조라 No가 중복된다.
-       그래서 No를 그대로 쓰지 않고 행 순서로 다시 번호를 매긴다.
-    """
+    
     sheets = list_sheets(src)
 
     # ① 우리 양식
@@ -288,9 +200,7 @@ def parse_patent_excel(src) -> pd.DataFrame:
         else:
             df["요약"] = ""
 
-        # ⚠️ 발명의 명칭으로 중복을 제거한다.
-        #    원본 파일은 '발명자 5명 기준 총 엔트리 55건 / 고유 35건'(조직개요) 구조라
-        #    한 특허가 공동발명자 수만큼 반복된다. 그대로 세면 특허 수가 부풀려진다.
+        
         n_before = len(df)
         df = df.drop_duplicates(subset=["발명의 명칭"], keep="first")
         if len(df) < n_before:
@@ -470,23 +380,7 @@ def unmatched_capability_rows(team_df) -> list:
 
 
 def read_capability_levels(team_df, evidence_df=None) -> dict:
-    """③ 6.팀역량종합의 '점수'(0~5)를 capability_id별로 읽는다.
-
-    시트의 '역량 카테고리' 표기와 CAPABILITY_DEFINITIONS의 name이 완전히 같지 않아
-    (예: '정량 계측 알고리즘' vs '정량계측 알고리즘') 공백을 제거하고 비교한다.
-
-    Args:
-        team_df    : 6.팀역량종합
-        evidence_df: level_fallback의 근거를 찾을 시트들(2.조직원·5.개인별역량).
-                     비우면 fallback을 적용하지 않는다.
-
-    ⚠️ level_fallback을 무조건 주면 안 된다. 시트에 ★가 없는 역량(cap_008 수의
-       도메인 지식 ★4 · cap_011 임상검증 ★3)에 상수를 넣는 장치인데, 조건 없이
-       주면 업로드 내용과 무관하게 항상 부여된다. 수의와 무관한 조직이 자기 파일을
-       올려도 '수의 도메인 지식 ★4'를 물려받아, 다른 조직으로 테스트할 때
-       실행가능성(C 도메인 전문성 5점)이 실제보다 높게 나온다.
-       → staff_keyword가 인력정보에서 실제로 잡힐 때만 인정한다.
-    """
+    
     # fallback 근거를 찾을 텍스트 (인력정보·개인별역량 전체)
     evidence_text = " ".join(
         "" if df is None else " ".join(df.astype(str).values.ravel())
@@ -509,25 +403,7 @@ def read_capability_levels(team_df, evidence_df=None) -> dict:
 
 
 # ---------------------------------------------------------------
-# 3-b. LLM 폴백 — 11개 카테고리에 없는 역량을 표준역량 32개 축에 직접 매핑
-#
-# ■ 왜 필요한가
-#   F1의 카테고리 11개는 코드에 박혀 있고 글자 비교로만 매칭된다. 그래서
-#   '영상진단 AI'처럼 어순이 다르거나 '진동·소음 이상탐지'처럼 다른 도메인 역량은
-#   조용히 버려진다. 표준역량은 32개인데 11개 축을 거치면 15개만 도달 가능해서,
-#   신사업 DB 50건 중 30건이 요구하는 역량을 어떤 파일을 올려도 보유할 수 없다.
-#
-# ■ 안전장치 3개
-#   ① 환각 차단 — 응답을 표준역량ID enum으로 제약하고, 받은 뒤 화이트리스트로
-#      한 번 더 검증한다(F4-1·F4-3과 같은 이중 방어).
-#      보유수준(★)은 LLM에 묻지 않는다. 시트의 '점수' 값을 그대로 쓴다.
-#      수준을 LLM이 만들면 없는 역량이 점수로 둔갑한다.
-#   ② 재현성 — temperature=0 + 같은 입력은 캐시에서 돌려준다.
-#   ③ 비용 — 문자열 매칭이 성공한 항목은 LLM에 보내지 않는다. 전부 매칭되면
-#      (샘플 조직 = 10/10) 호출 자체가 없다.
-#
-# ■ 꺼지는 조건 — 키가 없거나 openai 미설치거나 호출 실패면 폴백을 건너뛴다.
-#   그때는 이 기능이 없던 것과 완전히 동일하게 동작한다(미매칭 행은 버려짐).
+# 3-b. LLM 폴백 
 # ---------------------------------------------------------------
 LLM_MAP_MODEL_ENV = "F1_OPENAI_MODEL"
 LLM_MAP_MODEL_DEFAULT = "gpt-5-mini"
@@ -640,7 +516,7 @@ def _llm_map_unmatched(rows: list, choices: list) -> dict:
                 raise
         data = json.loads(resp.choices[0].message.content)
     except Exception as e:
-        print(f"⚠️ 역량 매핑 LLM 폴백 실패 — 미매칭 역량은 제외됩니다: {e}")
+        print(f"역량 매핑 LLM 폴백 실패 — 미매칭 역량은 제외됩니다: {e}")
         return {}
 
     out = {}
@@ -701,9 +577,6 @@ def inventors_by_class(patent_df) -> dict:
 
 
 # 6.팀역량종합 '근거' 텍스트 → 로드맵 연계 등급.
-#   ⚠️ '확장'·'보조'는 업로드 양식에 신호가 없어 유도할 수 없다(핵심으로 잡힌다).
-#      샘플 데이터 기준 12개 중 10개가 CSV와 일치하고, CAP_VIZ(보조)·
-#      CAP_MULTIMODAL(확장)만 핵심으로 올라간다. 배점 영향은 B로드맵연계 4점뿐이다.
 ROADMAP_RULES = [
     ("미연계", ["로드맵 미활용", "미활용", "레거시"]),
     ("개발 단계", ["개발 단계", "착수", "초기 개발"]),
@@ -736,11 +609,6 @@ def read_roadmap_notes(team_df) -> dict:
 
 
 def _roadmap_grade(note: str, patent_count: int):
-    """근거 문장 + 특허 보유로 로드맵 연계 등급을 정한다.
-
-    특허가 0건이면 None. CSV도 특허 0건 역량은 로드맵연계를 비워두며,
-    F3-2의 score_roadmap_link가 빈 값을 가중치 0으로 처리한다.
-    """
     if not patent_count:
         return None
     for grade, keywords in ROADMAP_RULES:
@@ -753,23 +621,7 @@ def to_standard_capabilities(cap_levels: dict, patent_df=None, team_df=None,
                              cap_evidence: dict = None,
                              evidence_detail: dict = None,
                              use_llm: bool = True) -> dict:
-    """⑥ F1 capability → F3 표준역량ID(CAP_*)별 조직 사실.
-
-    F3-2가 채점에 쓰는 조직 정보를 전부 업로드 데이터에서 만들어 넘긴다.
-      level        6.팀역량종합 ★ (judged 분기는 JUDGED_LEVEL)
-      patent_count 업로드 특허를 분류(A~I)별로 센 값
-      staff        그 분류 특허의 발명자 + staff_keyword로 잡은 인력
-      roadmap      6.팀역량종합 '근거' 문장에서 유도한 연계 등급
-
-    표준역량_정의.csv는 '어느 표준역량이 어느 특허분류인가' 같은 정의(분류 체계)로만
-    쓴다. 조직마다 달라지는 값(수준·특허수·인력·로드맵)은 업로드에서 나온다.
-    표준역량_정의.csv에 없는 ID가 나오면 경고한다 (어휘가 또 갈리는 것을 막는다).
-
-    Args:
-        use_llm: 11개 카테고리에 매칭 안 된 역량을 LLM으로 표준역량 축에 매핑한다.
-                 매칭이 전부 성공하면 호출이 없다(샘플 조직 = 10/10 → 비용 0).
-                 키가 없거나 실패하면 조용히 건너뛴다(= 이 기능이 없던 동작).
-    """
+    
     known, class_of = None, {}
     path = DATA_DIR / "표준역량_정의.csv"
     if path.exists():
@@ -791,17 +643,15 @@ def to_standard_capabilities(cap_levels: dict, patent_df=None, team_df=None,
             if ev.get("type") == "staff" and ev.get("name"):
                 kw_staff.setdefault(cap_id, []).append(ev["name"])
 
-    # ── ⓐ 문자열 매칭으로 잡힌 역량 (기존 경로 — 비용 0) ──
+    # ── ⓐ 문자열 매칭으로 잡힌 역량 ──
     plan = []       # (std_id, level, source, from_label, note, cap_id)
     for cap_id, targets in STANDARD_CAP_MAP.items():
         base = cap_levels.get(cap_id)
         for std_id, kind in targets:
             if known is not None and std_id not in known:
-                print(f"⚠️ 표준역량_정의.csv에 없는 ID: {std_id}")
+                print(f"표준역량_정의.csv에 없는 ID: {std_id}")
             if kind == "judged":
-                # ⚠️ 부모 역량이 없으면 세분화할 것도 없다. base를 안 보고
-                #    JUDGED_LEVEL을 그대로 쓰면, 그 역량을 신고하지 않은 조직에도
-                #    CAP_CLINICAL ★3·CAP_VIZ ★1이 근거 없이 붙는다(실측).
+                
                 if base is None:
                     continue
                 lv, src = JUDGED_LEVEL.get(std_id, base), "판단(세분화)"
@@ -810,7 +660,7 @@ def to_standard_capabilities(cap_levels: dict, patent_df=None, team_df=None,
             if lv is not None:
                 plan.append((std_id, lv, src, cap_id, notes.get(cap_id, ""), cap_id))
 
-    # ── ⓑ 매칭 실패한 역량만 LLM에게 물어본다 (미매칭 0건이면 호출 없음) ──
+    # ── ⓑ 매칭 실패한 역량만 LLM에게 물어본다 ──
     if use_llm:
         unmatched = unmatched_capability_rows(team_df)
         if unmatched:
@@ -827,7 +677,7 @@ def to_standard_capabilities(cap_levels: dict, patent_df=None, team_df=None,
                     plan.append((std_id, row["level"], "LLM 매핑",
                                  row["name"], row["note"], None))
 
-    # ── ⓒ 특허수·인력·로드맵을 붙인다 (두 경로 동일하게) ──
+    # ── ⓒ 특허수·인력·로드맵을 붙인다 ──
     out = {}
     for std_id, lv, src, from_label, note, cap_id in plan:
         letter = class_of.get(std_id, "")
@@ -853,15 +703,7 @@ def to_standard_capabilities(cap_levels: dict, patent_df=None, team_df=None,
 
 def build_org_context(overview: dict, staff_df, team_df, indiv_df,
                       intro_text: str, patent_df) -> dict:
-    """① 조직 플래그를 xlsx 1순위 · pptx 보조로 판정하고 출처를 남긴다.
-
-    원본은 pptx 문자열 검색만 썼고, 파싱이 실패하면 조용히 False가 되었다.
-    근거는 xlsx에 다 있다:
-      '30초 내 웹 응답'          → 6.팀역량종합
-      '엑스칼리버 국내 최초 상용화' → 1.조직개요 대표 성과
-      '수의사 면허'              → 2.조직원 학력
-      '산학협력(수의대 컨소시엄)'   → 5.개인별역량 특허 미반영 역량
-    """
+    
     def blob(df):
         return "" if df is None else " ".join(df.astype(str).values.ravel())
 
@@ -899,11 +741,7 @@ def build_org_context(overview: dict, staff_df, team_df, indiv_df,
 
 
 def detect_ip_gap(capabilities: list, evidence_detail: dict) -> list:
-    """멘토님 신호 02 — 역량은 보유했으나 관련 특허 0건 (IP 공백).
-
-    '30초 내 웹 응답, 무서버 병원 배포를 실제 구현했으나 관련 특허 0건.
-     보유 역량 대비 IP 공백(방어 취약점)을 탐지하는 케이스.'
-    """
+    
     out = []
     for c in capabilities:
         if not c["evidence_ids"]:
@@ -918,7 +756,6 @@ def detect_ip_gap(capabilities: list, evidence_detail: dict) -> list:
 
 
 def summarize_staff(staff_df) -> list:
-    """2-1 미리보기용 인력 목록. 컬럼명이 조금 달라도 찾아낸다."""
     if staff_df is None or staff_df.empty:
         return []
     cols = list(staff_df.columns)
@@ -943,7 +780,6 @@ def summarize_staff(staff_df) -> list:
 
 
 def detect_patent_concentration(staff_df) -> dict:
-    """멘토님 신호 03 — 특허가 상위 인력에 편중된 정도."""
     if staff_df is None or staff_df.empty:
         return {}
     col = next((c for c in staff_df.columns if "특허" in str(c)), None)
@@ -966,14 +802,8 @@ def detect_patent_concentration(staff_df) -> dict:
 # ---------------------------------------------------------------
 
 def build_organization_profile(files: dict) -> dict:
-    """조직 데이터를 파싱해 역량 프로필을 만든다.
-
-    files의 값은 경로 문자열 · Path · 업로드 파일 객체 아무거나 된다.
-      {"intro_pptx": ..., "staff_excel": ..., "patent_excel": ...(생략 가능)}
-
-    반환에 parse_status가 포함된다 (기능명세 1-5 업로드 진행 상태 표시용).
-    """
-    status = {}     # 1-5  단계별 파싱 결과
+    
+    status = {}     
 
     def safe(fn, label, default=None):
         try:
@@ -982,7 +812,7 @@ def build_organization_profile(files: dict) -> dict:
             return out
         except Exception as e:
             status[label] = {"ok": False, "detail": str(e)[:120]}
-            print(f"⚠️ {label} 실패, 건너뜀: {e}")
+            print(f" {label} 실패, 건너뜀: {e}")
             return default
 
     intro_src = files.get("intro_pptx")
@@ -1028,30 +858,27 @@ def build_organization_profile(files: dict) -> dict:
 
     return {
         "organization_id": "org_001",
-        # 2-1 미리보기용 — 원본에서 읽은 조직 개요와 인력 목록.
-        #     원래는 org_context 판정에만 쓰고 버렸는데, 사용자가 '무엇을 읽었는지'
-        #     확인할 수 있어야 하므로 프로필에 담는다.
+        
         "organization": {str(k): str(v) for k, v in overview.items()
                          if not str(k).startswith("[")},
         "staff": summarize_staff(staff_df),
         "capabilities": capabilities,
         "evidence_ids": sorted(evidence_detail.keys()),
         "evidence": evidence_detail,
-        # ⑥ F3 연결용 — 표준역량별 수준·특허수·인력·로드맵을 모두 업로드에서 만든다
+        
         "standard_capability_levels": to_standard_capabilities(
             cap_levels, patent_df, team_df, cap_evidence, evidence_detail),
-        # 분류(A~I)별 특허 건수 — 표준역량 단위로 쪼개기 전 원본 집계 (검증·표시용)
+        
         "patent_class_counts": count_patents_by_class(patent_df),
         "org_context": build_org_context(overview, staff_df, team_df, indiv_df,
                                         intro_text, patent_df),
-        "signals": {                                    # 멘토님 '잡아내야 할 신호'
+        "signals": {                                    
             "ip_gap": detect_ip_gap(capabilities, evidence_detail),
             "patent_concentration": detect_patent_concentration(staff_df),
         },
-        # 1-4  특허 보유 여부 자동 판별 — 파일 업로드 여부가 아니라
-        #      실제로 분류(A~I)가 붙은 특허를 읽었는지로 판정한다.
+        
         "has_patent_data": len(patent_df) > 0,
-        # 1-5  업로드 진행 상태 표시
+        
         "parse_status": status,
     }
 
@@ -1062,7 +889,7 @@ if __name__ == "__main__":
     except AttributeError:
         pass
 
-    # 개발용 — samples/ 폴더가 있으면 거기서 읽는다. 실제로는 업로드로 받는다.
+    
     ORG = SAMPLES_DIR if SAMPLES_DIR.exists() else Path.home() / "Desktop" / "A19" / "조직데이터"
     files = {
         "intro_pptx": str(next(ORG.glob("*.pptx"))),
