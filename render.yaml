@@ -1,35 +1,13 @@
-# Render 배포 설정 (Blueprint)
-#
-# 사용법
-#   1. 이 저장소를 GitHub에 Private으로 올린다
-#   2. Render → New → Blueprint → Configure account 로 GitHub 앱 권한을 준다
-#      (Private 저장소는 Render가 목록에 못 띄우므로 이 단계가 필요하다)
-#   3. 저장소 선택 → Apply
-#   4. OPENAI_API_KEY는 Render 대시보드 Environment 탭에서 직접 입력한다
-#      (sync: false 라서 이 파일에는 값이 들어가지 않는다)
-#
-# ⚠️ 저장소는 Private이어도 배포 URL(https://<name>.onrender.com)은 공개다.
-#    링크를 아는 사람은 누구나 접속할 수 있으므로 외부 공유에 주의한다.
-#    URL 자체를 막으려면 유료 플랜의 접근 제어가 필요하다.
-#
-# ⚠️ plan 관련
-#   free/starter는 메모리 512MB다. sentence-transformers가 쓰는
-#   ko-sroberta 임베딩 모델이 로딩만으로 400MB 이상을 먹어서, 아이디어 적합도
-#   판단형에서 OOM으로 죽을 수 있다. 그 기능까지 쓰려면 standard(2GB) 이상을
-#   권한다. 화면·DB 채점·역량 기반 추천형은 free에서도 동작한다.
-
 services:
   - type: web
     name: sunic-newbiz-ai
     runtime: python
     plan: free
-    region: singapore          # 한국에서 가장 가까운 리전
+    region: singapore          
     branch: main
 
     buildCommand: pip install -r requirements.txt
 
-    # Render는 포트를 $PORT 환경변수로 준다. 고정 포트로 띄우면 접속이 안 된다.
-    # --server.address 0.0.0.0 이 없으면 컨테이너 밖에서 못 붙는다.
     startCommand: >
       streamlit run main.py
       --server.port $PORT
@@ -43,15 +21,12 @@ services:
       - key: PYTHON_VERSION
         value: "3.11"
 
-      # 임베딩 모델을 매 배포마다 다시 받지 않도록 캐시 위치를 고정한다
       - key: HF_HOME
         value: /opt/render/project/.cache/huggingface
 
-      # 🔑 값은 여기 적지 말고 Render 대시보드에서 입력한다
       - key: OPENAI_API_KEY
         sync: false
 
-      # 모델을 바꾸고 싶을 때만 대시보드에서 설정 (없으면 코드 기본값 사용)
       - key: OPENAI_MODEL
         sync: false
       - key: F5_OPENAI_MODEL
