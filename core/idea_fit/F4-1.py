@@ -6,10 +6,6 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 try:
-    # 로컬 개발용 .env에서 OPENAI_API_KEY 등을 읽어온다.
-    # 배포(Streamlit Cloud)에서는 st.secrets를 쓰므로 python-dotenv가 없어도
-    # 동작해야 한다. 여기서 그냥 import하면 패키지가 없는 팀원 PC에서
-    # F4 화면 전체가 로드조차 되지 않는다.
     from dotenv import load_dotenv
 
     load_dotenv()
