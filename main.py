@@ -28,8 +28,14 @@ _EV_ID = r"ev_[A-Za-z0-9_가-힣]+"
 _EV_GROUP = re.compile(                      # (ev_a, ev_b) / [ev_a] / (예: ev_a)
     r"\s*[\(\[]\s*(?:예\s*[:：]\s*)?" + _EV_ID
     + r"(?:\s*[,、·]\s*" + _EV_ID + r")*\s*[\)\]]")
-_EV_BARE = re.compile(r"\s*[,、·]?\s*" + _EV_ID)      
-_EV_TIDY = [                                          
+_EV_BARE = re.compile(r"\s*[,、·]?\s*" + _EV_ID)
+# LLM이 근거를 'evidence_id' 라벨째로 남기는 경우 — (evidence_id:) / [evidence_ids: ev_a]
+# 값이 비어 있어도 지운다. ev_로 시작하지 않아 위 두 규칙에 걸리지 않는다.
+_EV_LABEL = re.compile(r"\s*[\(\[]\s*evidence[_\s]?ids?\s*[:：][^)\]]*[\)\]]",
+                       re.IGNORECASE)
+_EV_LABEL_BARE = re.compile(r"\s*[,、·]?\s*evidence[_\s]?ids?\s*[:：]",
+                            re.IGNORECASE)
+_EV_TIDY = [
     (re.compile(r"\(\s*\)|\[\s*\]"), ""),
     (re.compile(r"\s+([,.·、)\]])"), r"\1"),
     (re.compile(r"([(\[])\s+"), r"\1"),
@@ -40,8 +46,10 @@ _EV_TIDY = [
 def strip_evidence_ids(text: str) -> str:
     if not text:
         return text
-    out = _EV_GROUP.sub("", str(text))
+    out = _EV_LABEL.sub("", str(text))
+    out = _EV_GROUP.sub("", out)
     out = _EV_BARE.sub("", out)
+    out = _EV_LABEL_BARE.sub("", out)
     for pat, rep in _EV_TIDY:
         out = pat.sub(rep, out)
     return out.strip()
@@ -1622,8 +1630,8 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
             st.markdown("""
 <div class="note-card wait">
   <p class="section-title">요구역량 명세</p>
-  <p>추천받은 아이디어를 위 폼에 채웠습니다.
-     <b>적합도 판단하기</b>를 누르면 8개 항목으로 채점합니다.</p>
+  <p>추천 아이디어가 위 폼에 입력되어 있습니다.
+     <b>적합도 판단하기</b>를 누르면 요구역량을 추출해 8개 항목으로 채점합니다.</p>
 </div>""", unsafe_allow_html=True)
             return
             
@@ -2422,7 +2430,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     with tab_categories:
         st.markdown('<p class="f5-tab-title">8개 평가항목 요약</p>', unsafe_allow_html=True)
         st.markdown(
-            '<p class="f5-section-lead">카드에서는 핵심 결론만 확인하고, 상세 분석에서 세부항목별 판단과 보완점을 볼 수 있습니다.</p>',
+            '<p class="f5-section-lead">\'+ 자세히 보기\'를 통해 세부항목별 판단과 보완점을 볼 수 있습니다.</p>',
             unsafe_allow_html=True,
         )
         
@@ -2471,7 +2479,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     with tab_gaps:
         st.markdown('<p class="f5-tab-title">우선 보완 과제</p>', unsafe_allow_html=True)
         st.markdown(
-            '<p class="f5-section-lead">원인과 사업상 영향은 접어두고, 우선 확보 방향과 핵심 판단부터 보여줍니다.</p>',
+            '<p class="f5-section-lead">우선 확보 방향과 핵심 판단부터 보여줍니다.</p>',
             unsafe_allow_html=True,
         )
         for gap in gaps:
@@ -2531,7 +2539,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     with tab_roadmap:
         st.markdown('<p class="f5-tab-title">실행 로드맵</p>', unsafe_allow_html=True)
         st.markdown(
-            '<p class="f5-section-lead">기간을 임의로 단정하지 않고 단기·중기·장기의 목표, 실행항목과 완료기준을 구분합니다.</p>',
+            '<p class="f5-section-lead">단기·중기·장기의 목표, 실행 항목과 완료 기준을 보여줍니다.</p>',
             unsafe_allow_html=True,
         )
         st.markdown(
