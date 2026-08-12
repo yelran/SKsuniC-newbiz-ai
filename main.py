@@ -721,6 +721,9 @@ body{{color:var(--text)}}
   border:1px solid var(--border);border-radius:10px;padding:14px 16px;
   align-items:center;gap:12px;margin:0;flex-wrap:nowrap}}
 {UP_DEL} [data-testid="column"]{{min-width:0}}
+/* Streamlit이 마크다운 컨테이너에 margin-bottom:-16px를 걸어 둔다. 그대로 두면
+   칸 높이가 26px→10px로 줄어 파일명이 × 보다 8px 아래로 내려간다(실측). */
+{UP_DEL} [data-testid="stMarkdownContainer"]{{margin-bottom:0}}
 {UP_DEL} [data-testid="stHorizontalBlock"] .stButton{{display:flex;justify-content:flex-end}}
 {UP_DEL} [data-testid="stHorizontalBlock"] .stButton button{{width:26px;height:26px;
   min-height:26px;padding:0;border-radius:6px;background:transparent;
