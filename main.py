@@ -1614,6 +1614,8 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
 
     
     score_key = f"idea_score_{active_tab}"
+    # 채점 후에도 자리를 빈 채로 유지한다(요소 순서 고정).
+    slot = st.empty()
     if score_key not in st.session_state:
         if not st.session_state.get(run_key):
             
@@ -1629,7 +1631,6 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
             st.session_state[score_key] = None
         else:
             # 시장 추정도 LLM 호출이라 백그라운드로 돌린다
-            slot = st.empty()
             running, _elapsed, result = _take_job(f"score:{active_tab}")
             if running:
                 result = _await_job(f"score:{active_tab}",
@@ -1776,8 +1777,10 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
     key = f"idea_judgment_{tab}"
     saved = st.session_state.get(key)
 
+    # 생성 후에도 자리를 빈 채로 유지한다(요소 순서 고정 — 위 주석 참고).
+    slot = st.empty()
+
     if saved is None:
-        slot = st.empty()
         running, _elapsed, result = _take_job(f"judgment:{tab}")
         if running:
             result = _await_job(f"judgment:{tab}", "LLM 매칭 판단 중…", slot)
@@ -1835,9 +1838,13 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
         st.markdown('<span class="newcand-marker" style="display:none"></span>',
                     unsafe_allow_html=True)
 
+        # 진행표시가 들어갈 자리. 생성이 끝난 뒤에도 '빈 채로' 계속 잡아 둔다 —
+        # 실행마다 요소 개수가 달라지면 아래 요소들의 순서가 밀려서, 이전 실행의
+        # 버튼이 안 지워지고 겹쳐 보이거나 설명이 사라진다.
+        slot = st.empty()
+
         if saved is None:
             # 제안 중에는 버튼 자리를 진행표시로 바꿔 끼운다(중복 클릭 방지 + 연결 유지).
-            slot = st.empty()
             running, _elapsed, result = _take_job("new_cands")
             if running:
                 result = _await_job("new_cands", "신규 후보 제안 중…", slot)
@@ -2205,6 +2212,11 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
         if diagnosis_mode == "idea_fit"
         else float(sel["배점합"]) if sel["배점합"] else 100.0
     )
+    # 생성은 백그라운드로 넘기고, 이 자리(slot)만 몇 초마다 다시 그려 연결을
+    # 살려 둔다. 페이지 전체를 rerun하지 않으므로 스크롤이 튀지 않는다.
+    # 리포트가 나온 뒤에도 자리는 빈 채로 유지한다(요소 순서 고정).
+    slot = st.empty()
+
     if gap_report is None and gap_error is None:
         if missing_caps:
             focus_text = (
@@ -2215,9 +2227,6 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 f"비만점 평가항목 {len(nonfull_categories)}개 · "
                 f"{', '.join(nonfull_categories)} · 점수 결과에서 보완과제를 자동 추출합니다."
             )
-        # 생성은 백그라운드로 넘기고, 이 자리(slot)만 몇 초마다 다시 그려
-        # 연결을 살려 둔다. 페이지 전체를 rerun하지 않으므로 스크롤이 튀지 않는다.
-        slot = st.empty()
         running, _elapsed, result = _take_job(f"gap:{report_key}")
         if running:
             # 새로고침 등으로 화면이 끊겼던 작업을 이어받는다.
