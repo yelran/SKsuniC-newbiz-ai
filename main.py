@@ -716,8 +716,9 @@ body{{color:var(--text)}}
 /* 카드 화면(1~3)의 세로 블록은 flex:1로 늘어난다 — 이 컨테이너까지 늘어나면
    카드 안 배치가 틀어지므로 제자리 크기로 고정한다. */
 {UP_DEL}>div>[data-testid="stVerticalBlock"]{{flex:0 0 auto;gap:0}}
+/* padding·gap은 예전 .up-file 값(14px 16px / 12px) 그대로여야 카드 높이가 안 바뀐다 */
 {UP_DEL} [data-testid="stHorizontalBlock"]{{background:var(--surface);
-  border:1px solid var(--border);border-radius:10px;padding:10px 16px;
+  border:1px solid var(--border);border-radius:10px;padding:14px 16px;
   align-items:center;gap:12px;margin:0;flex-wrap:nowrap}}
 {UP_DEL} [data-testid="column"]{{min-width:0}}
 {UP_DEL} [data-testid="stHorizontalBlock"] .stButton{{display:flex;justify-content:flex-end}}
@@ -1629,7 +1630,7 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
         prev = st.session_state.get(req_key)
         
         if not (prev and prev.get("input") == user_input):
-            with st.spinner("요구역량 추출 중… (최초 1회는 임베딩 모델 로딩으로 오래 걸립니다)"):
+            with st.spinner("요구역량 추출 중…"):
                 try:
                     st.session_state[req_key] = f4_1.extract_idea_requirements(user_input)
                     st.session_state.pop(f"idea_req_error_{active_tab}", None)
@@ -2260,9 +2261,14 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
         if diagnosis_mode == "idea_fit"
         else float(sel["배점합"]) if sel["배점합"] else 100.0
     )
-    # 생성은 백그라운드로 넘기고, 이 자리(slot)만 몇 초마다 다시 그려 연결을
-    # 살려 둔다. 페이지 전체를 rerun하지 않으므로 스크롤이 튀지 않는다.
-    # 리포트가 나온 뒤에도 자리는 빈 채로 유지한다(요소 순서 고정).
+    # 생성은 백그라운드로 넘기고, 아래 slot만 몇 초마다 다시 그려 연결을 살려 둔다.
+    # 페이지 전체를 rerun하지 않으므로 스크롤이 튀지 않는다.
+    #
+    # 자리를 둘로 나눈다 — 안내 카드(card_slot)는 생성 중에도 그대로 두고,
+    # 버튼 자리(slot)에만 진행표시를 바꿔 끼운다. 하나로 쓰면 진행표시가 카드를
+    # 밀어내고 그 위에 올라앉아 보였다.
+    # 리포트가 나온 뒤에도 두 자리 모두 빈 채로 유지한다(요소 순서 고정).
+    card_slot = st.empty()
     slot = st.empty()
 
     if gap_report is None and gap_error is None:
@@ -2275,21 +2281,22 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 f"비만점 평가항목 {len(nonfull_categories)}개 · "
                 f"{', '.join(nonfull_categories)} · 점수 결과에서 보완과제를 자동 추출합니다."
             )
-        running, _elapsed, result = _take_job(f"gap:{report_key}")
-        if running:
-            # 새로고침 등으로 화면이 끊겼던 작업을 이어받는다.
-            result = _await_job(f"gap:{report_key}", "갭 리포트 생성 중…", slot)
-
-        if result is None:
-            with slot.container():
-                st.markdown(f"""
+        # 안내 카드는 생성 중에도 계속 보인다.
+        card_slot.markdown(f"""
 <div class="note-card wait">
   <p class="section-title">역량 갭 리포트 · 보완 로드맵</p>
   <p>{html.escape(focus_text)}</p>
   <p class="csub">현재 {sel['획득']:.1f}점 / 목표 {target:.0f}점 기준으로
     보완전략(Build·Buy·Partner·Hire)과 단기·중기·장기 로드맵을 생성합니다.</p>
 </div>""", unsafe_allow_html=True)
-                clicked = st.button("AI 갭 리포트 생성", key=f"gen_{report_key}")
+
+        running, _elapsed, result = _take_job(f"gap:{report_key}")
+        if running:
+            # 새로고침 등으로 화면이 끊겼던 작업을 이어받는다.
+            result = _await_job(f"gap:{report_key}", "갭 리포트 생성 중…", slot)
+
+        if result is None:
+            clicked = slot.button("AI 갭 리포트 생성", key=f"gen_{report_key}")
             if not clicked:
                 return
 
@@ -2330,7 +2337,8 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
             _start_job(f"gap:{report_key}", f5.generate_gap_report, gap_data, sources)
             result = _await_job(f"gap:{report_key}", "갭 리포트 생성 중…", slot)
 
-        # 결과를 손에 쥔 채 그대로 아래 렌더링으로 흘러간다(rerun 없음).
+        # 결과가 나왔으니 안내 카드를 치우고, 그대로 아래 렌더링으로 흘러간다(rerun 없음).
+        card_slot.empty()
         result = result or (None, "리포트 결과를 받지 못했습니다.")
         st.session_state[report_key] = result
         gap_report, gap_error = result
