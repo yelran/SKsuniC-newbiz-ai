@@ -3,6 +3,9 @@ import html
 import math
 import re
 import sys
+import threading
+import time
+import uuid 
 from pathlib import Path
 
 import pandas as pd
@@ -11,12 +14,13 @@ import streamlit as st
 # 경로는 core/paths.py에서만 정의
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from core.paths import (  # noqa: E402
-    ASSETS_DIR, DATA_DIR, DB_PATH, LOGO_PATH, SAMPLES_DIR,
+    ASSETS_DIR, DATA_DIR, DB_PATH, FAVICON_PATH, LOGO_PATH, SAMPLES_DIR,
     IDEA_FIT_DIR, PROFILE_DIR, RECOMMEND_DIR, RESULT_DIR, SCORING_DIR,
     UPLOAD_DIR, load_module, try_load_module,
 )
 
-st.set_page_config(page_title="suniC · 신사업 진단 AI", page_icon="🩺", layout="wide")
+st.set_page_config(page_title="suniC · 신사업 진단 AI",
+                   page_icon=str(FAVICON_PATH), layout="wide")
 
 
 
@@ -1619,17 +1623,27 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
      <b>적합도 판단하기</b>를 누르면 8개 항목으로 채점합니다.</p>
 </div>""", unsafe_allow_html=True)
             return
-        if f4_4 and (std_ids or unmatched_caps):
-            with st.spinner("시장 데이터 추정 및 채점 중…"):
-                st.session_state[score_key] = f4_4.calculate_idea_score(
-                    std_ids,
-                    idea_context,
-                    org_ctx,
-                    return_detail=True,
-                    unmatched_capabilities=unmatched_caps,
-                )
-        else:
+            
+        if not (f4_4 and (std_ids or unmatched_caps)):
             st.session_state[score_key] = None
+        else:
+            # 시장 추정도 LLM 호출이라 백그라운드로 돌린다
+            running, elapsed, result = _take_job(f"score:{active_tab}")
+            if result is not None:
+                value, error = result
+                st.session_state[score_key] = value
+                st.session_state[f"idea_score_error_{active_tab}"] = error
+                st.rerun()
+            if running:
+                _job_progress("시장 데이터 추정 및 채점 중…", elapsed)
+            _start_job(f"score:{active_tab}", f4_4.calculate_idea_score,
+                       std_ids, idea_context, org_ctx,
+                       return_detail=True, unmatched_capabilities=unmatched_caps)
+            st.rerun()
+
+    score_error = st.session_state.get(f"idea_score_error_{active_tab}")
+    if score_error:
+        st.warning(f"채점에 실패했습니다 — {score_error}")
 
     r = st.session_state[score_key]
     if r:
@@ -1759,16 +1773,24 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
     saved = st.session_state.get(key)
 
     if saved is None:
-        if st.button("판단 근거 생성", key=f"gen_idea_judgment_{tab}",
-                     use_container_width=True):
+        running, elapsed, result = _take_job(f"judgment:{tab}")
+        if result is not None:
+            value, error = result
+            st.session_state[key] = value if error is None else {
+                "ranked_candidates": [], "used_llm": False, "error": error,
+            }
+            st.rerun()
+        if running:
+            _job_progress("LLM 매칭 판단 중…", elapsed)
+        elif st.button("판단 근거 생성", key=f"gen_idea_judgment_{tab}",
+                       use_container_width=True):
             cand = [{
                 "id": str(sel["아이디어ID"]), "name": str(sel["아이디어명"]),
                 "total_score": float(sel["총점"]),
                 "scores": {n: sel[n] for n, _, _ in ITEMS},
                 "matched": list(sel["matched"]), "missing": list(sel["missing"]),
             }]
-            with st.spinner("LLM 매칭 판단 중…"):
-                st.session_state[key] = f4_2.llm_match_judgment(profile, cand)
+            _start_job(f"judgment:{tab}", f4_2.llm_match_judgment, profile, cand)
             st.rerun()
         return
 
@@ -1810,21 +1832,28 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
 <p class="section-title">LLM추천 후보</p>
 <p class="csub">신사업 DB 50건에 없는 아이디어를 조직 역량만 보고 LLM이 제안합니다.</p>
 """, unsafe_allow_html=True)
-            # 제안 중에는 버튼을 진행표시로 '바꿔 끼운다'. st.empty()에 다시 그리면
-            # 버튼이 있던 자리가 그대로 교체돼서, 버튼과 '신규 후보 제안 중…'이
-            # 위아래로 같이 보이지 않는다(중복으로 눌리는 것도 막힌다).
-            # 갭 리포트 생성 버튼과 같은 방식이다.
-            gen_slot = st.empty()
-            if gen_slot.button("신규 후보 제안받기", key="gen_new_cands", type="primary"):
+
+            # 제안 중에는 버튼 대신 진행표시를 보여준다(중복 클릭 방지 + 연결 유지).
+            
+            running, elapsed, result = _take_job("new_cands")
+            if result is not None:
+                value, error = result
+                st.session_state[key] = value if error is None else {
+                    "new_candidates": [], "overall_summary": "",
+                    "used_llm": False, "error": error,
+                }
+                st.rerun()
+            if running:
+                _job_progress("신규 후보 제안 중…", elapsed)
+            elif st.button("신규 후보 제안받기", key="gen_new_cands", type="primary"):
                 # Top-3(results)가 아니라 DB 50건 전체(all_candidates)를 기준으로
                 # 중복을 걸러야, 화면에 안 보이는 나머지 후보와 겹치는 제안을 막을 수 있다.
                 existing = [{"id": r["아이디어ID"], "name": r["아이디어명"],
                              "total_score": r["총점"]} for _, r in all_candidates.iterrows()]
-                with gen_slot.container():
-                    with st.spinner("신규 후보 제안 중…"):
-                        st.session_state[key] = f4_3.propose_new_candidates(profile, existing)
+                _start_job("new_cands", f4_3.propose_new_candidates, profile, existing)
                 st.rerun()
             return
+            
 
         if saved.get("error"):
             st.markdown(f"""
@@ -2050,7 +2079,67 @@ def _nonfull_score_categories(sel) -> list[str]:
             continue
     return result
 
+# ── LLM 호출 백그라운드 실행 ──────────────────────────────────────
+# 배포 환경(Render)은 데이터가 오가지 않는 연결을 약 4분 만에 끊는다.
+# → 호출은 워커 스레드에 맡기고, 화면은 몇 초마다 다시 그려 연결을 살려 둔다.
 
+
+LLM_POLL_SECONDS = 5
+
+_JOBS: dict = {}
+_JOBS_LOCK = threading.Lock()
+
+
+def _job_key(name: str) -> str:
+    """작업 저장소는 모든 접속자가 공유하므로 세션 id를 붙여 키를 갈라 둔다.
+    (붙이지 않으면 같은 후보를 보는 다른 사용자와 결과가 뒤바뀔 수 있다)"""
+    if "_session_id" not in st.session_state:
+        st.session_state["_session_id"] = uuid.uuid4().hex[:12]
+    return f'{st.session_state["_session_id"]}::{name}'
+
+
+def _start_job(name: str, fn, *args, **kwargs) -> None:
+    """fn(*args, **kwargs)를 백그라운드에서 실행한다."""
+    key = _job_key(name)
+
+    def _run():
+        try:
+            outcome = (fn(*args, **kwargs), None)
+        except Exception as exc:
+            outcome = (None, str(exc))
+        with _JOBS_LOCK:
+            job = _JOBS.get(key)
+            if job is not None:
+                job["result"] = outcome
+
+    with _JOBS_LOCK:
+        _JOBS[key] = {"started": time.time(), "result": None}
+    threading.Thread(target=_run, name=f"job-{name}", daemon=True).start()
+
+
+def _take_job(name: str):
+    """(진행중, 경과초, (값, 오류)) — 결과가 나왔으면 꺼내면서 작업을 지운다."""
+    key = _job_key(name)
+    with _JOBS_LOCK:
+        job = _JOBS.get(key)
+        if job is None:
+            return False, 0.0, None
+        elapsed = time.time() - job["started"]
+        if job["result"] is None:
+            return True, elapsed, None
+        return False, elapsed, _JOBS.pop(key)["result"]
+
+
+def _job_progress(label: str, elapsed: float) -> None:
+    """진행 표시를 그리고 잠시 뒤 화면을 다시 그린다 — 이 갱신이 연결을 살려 둔다."""
+    st.markdown(f'<p class="form-hint">{html.escape(label)} {int(elapsed)}초 경과</p>',
+                unsafe_allow_html=True)
+    time.sleep(LLM_POLL_SECONDS)
+    st.rerun()
+
+
+        
+        
 def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                       key_prefix: str = "gap",
                       diagnosis_mode: str = "capability_recommendation") -> None:
@@ -2101,8 +2190,16 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
     보완전략(Build·Buy·Partner·Hire)과 단기·중기·장기 로드맵을 생성합니다.</p>
 </div>""", unsafe_allow_html=True)
        
-        gen_slot = st.empty()
-        if gen_slot.button("AI 갭 리포트 생성", key=f"gen_{report_key}"):
+               # 생성은 백그라운드로 넘기고, 화면은 주기적으로 다시 그려 연결을 살려 둔다.
+        running, elapsed, result = _take_job(f"gap:{report_key}")
+        if result is not None:
+            st.session_state[report_key] = result
+            st.rerun()
+            
+        if running:
+            _job_progress("갭 리포트 생성 중…", elapsed)
+            
+        elif st.button("AI 갭 리포트 생성", key=f"gen_{report_key}"):
             idea_context = _build_f5_idea_context(sel)
             url = _safe_cell(sel, "출처링크")
             sources = [{
@@ -2137,13 +2234,7 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 "idea": idea_context,
                 "organization_id": profile.get("organization_id"),
             }
-            try:
-                with gen_slot.container():
-                    with st.spinner("갭 리포트 생성 중…"):
-                        report = f5.generate_gap_report(gap_data, sources)
-                st.session_state[report_key] = (report, None)
-            except f5.F5Error as e:
-                st.session_state[report_key] = (None, str(e))
+            _start_job(f"gap:{report_key}", f5.generate_gap_report, gap_data, sources)
             st.rerun()
         return
 
