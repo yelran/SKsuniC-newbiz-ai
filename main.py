@@ -1734,8 +1734,8 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
     left, right = st.columns([1, 1])
     with left:
         chips = "".join(
-            f'<span class="cap-chip"><b>{html.escape(c["name"])}</b>'
-            f'<u>{c["source"]}</u></span>' for c in req["required_capabilities"])
+            f'<span class="cap-chip"><b>{html.escape(c["name"])}</b></span>'
+            for c in req["required_capabilities"])
         llm_note = (f'<p class="csub" style="margin-top:8px;color:var(--text-3)">'
                     f'LLM 보완 사용 · {_safe_llm_text(req["llm_rationale"] or "")}</p>'
                     if req["used_llm_fallback"] else "")
