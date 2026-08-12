@@ -23,6 +23,7 @@ DB_PATH = DATA_DIR / "신사업_DB.xlsx"
 CAPABILITY_DEF_PATH = DATA_DIR / "표준역량_정의.csv"
 CAPABILITY_MAP_PATH = DATA_DIR / "역량어휘_매핑.csv"
 LOGO_PATH = ASSETS_DIR / "logo.png"
+FAVICON_PATH = ASSETS_DIR / "favicon.png"     
 
 
 MODULE_DIRS = [UPLOAD_DIR, PROFILE_DIR, RECOMMEND_DIR,
