@@ -41,6 +41,20 @@ CAPABILITY_DEFINITIONS = [
 
 EMBEDDING_MODEL_NAME = "jhgan/ko-sroberta-multitask"  # main.py(F2-2)와 동일 모델 — 로딩 캐시 공유 목적
 
+# 임베딩 매핑은 torch를 불러오는 순간 RSS가 700MB를 넘는다(실측: import만으로 733MB,
+# 모델까지 762MB). 메모리가 작은 배포 환경(예: 512MB)에서는 그 자리에서 프로세스가
+# 죽어 세션까지 날아간다 — 화면이 처음으로 튕기는 원인이었다.
+#
+# 그래서 기본값을 '쓰지 않음'으로 둔다. 환경변수를 설정하는 걸 잊어도 배포가
+# 안전한 쪽으로 기울게 하려는 것이다. 메모리가 넉넉한 곳에서 임베딩을 쓰려면
+# F4_1_USE_EMBEDDING=1을 준다.
+#
+# 끈 상태에서는 키워드 매핑만 쓰고, 신뢰도가 낮게 잡혀 아래
+# extract_idea_requirements의 LLM 보완 경로가 대신 요구역량을 뽑는다.
+USE_EMBEDDING = os.environ.get("F4_1_USE_EMBEDDING", "").strip().lower() in {
+    "1", "true", "yes", "on",
+}
+
 
 EXTRA_KEYWORDS: dict[str, list[str]] = {}
 
@@ -69,6 +83,28 @@ def keyword_hits(text: str, cap_id: str) -> int:
     return sum(1 for kw in kws if kw in text)
 
 
+def _keyword_only_capabilities(text: str, top_k: int, keyword_bonus: float) -> list:
+    """임베딩 없이 키워드만으로 매핑한다. 모델을 전혀 불러오지 않는다.
+
+    유사도가 없으므로 점수가 낮게 나오고, 그 결과 confidence가 낮아져
+    extract_idea_requirements가 LLM 보완 경로를 타게 된다 — 의도된 동작이다.
+    """
+    results = []
+    for cap in CAPABILITY_DEFINITIONS:
+        hits = keyword_hits(text, cap["capability_id"])
+        if not hits:
+            continue
+        results.append({
+            "capability_id": cap["capability_id"],
+            "name": cap["name"],
+            "score": round(keyword_bonus * hits, 4),
+            "similarity": None,
+            "keyword_hits": hits,
+        })
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results[:top_k] if top_k else results
+
+
 def map_text_to_capabilities(text: str, top_k: int = 3, sim_threshold: float = 0.35,
                               keyword_bonus: float = 0.15) -> list:
     """자유서술 텍스트 -> F1 capability_id 리스트 정규화.
@@ -79,11 +115,19 @@ def map_text_to_capabilities(text: str, top_k: int = 3, sim_threshold: float = 0
     if not text or not text.strip():
         return []
 
-    from sentence_transformers import util
-    model = _get_embedding_model()
-    cap_emb = _capability_embeddings()
-    query_emb = model.encode(text, convert_to_tensor=True)
-    sims = util.cos_sim(query_emb, cap_emb)[0].tolist()
+    if not USE_EMBEDDING:
+        return _keyword_only_capabilities(text, top_k, keyword_bonus)
+
+    try:
+        from sentence_transformers import util
+        model = _get_embedding_model()
+        cap_emb = _capability_embeddings()
+        query_emb = model.encode(text, convert_to_tensor=True)
+        sims = util.cos_sim(query_emb, cap_emb)[0].tolist()
+    except Exception:
+        # 모델을 못 불러오면(미설치·메모리 부족·다운로드 실패) 조용히 키워드로 내려간다.
+        # 여기서 예외가 올라가면 적합도 판단 화면 전체가 멈춘다.
+        return _keyword_only_capabilities(text, top_k, keyword_bonus)
 
     results = []
     for cap, sim in zip(CAPABILITY_DEFINITIONS, sims):

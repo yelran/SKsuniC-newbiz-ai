@@ -291,22 +291,29 @@ def retrieve_business_candidates(db: pd.DataFrame, query: str, top_k: int = 3,
 
     terms = [t.strip() for t in query.replace(",", " ").split() if t.strip()]
 
+    hits = []
     if mode == "임베딩":
-        from sentence_transformers import util
-        model = load_embedder()
-        passages = tuple(db["아이디어명"] + ". " + db["필요역량태그"])
-        doc_emb = build_doc_embeddings(passages)
-        sims = util.cos_sim(model.encode(query, convert_to_tensor=True), doc_emb)[0].tolist()
+        # 임베딩 모델은 torch를 불러오는 것만으로 RSS가 700MB를 넘는다(실측).
+        # 메모리가 작은 배포 환경에서는 프로세스가 죽으므로, 못 불러오면
+        # 예외를 올리지 말고 조용히 키워드 검색으로 내려간다.
+        try:
+            from sentence_transformers import util
+            model = load_embedder()
+            passages = tuple(db["아이디어명"] + ". " + db["필요역량태그"])
+            doc_emb = build_doc_embeddings(passages)
+            sims = util.cos_sim(
+                model.encode(query, convert_to_tensor=True), doc_emb)[0].tolist()
+        except Exception:
+            mode = "키워드"
+        else:
+            for idx, sim in enumerate(sims):
+                tag_text = db.iloc[idx]["필요역량태그"]
+                hit_count = sum(1 for t in terms if t in tag_text)
+                combined = sim + KEYWORD_MATCH_BONUS * hit_count
+                if combined >= MIN_ABSOLUTE_SCORE:
+                    hits.append((idx, combined, f"유사도 {sim:.3f} · 키워드 {hit_count}개"))
 
-        hits = []
-        for idx, sim in enumerate(sims):
-            tag_text = db.iloc[idx]["필요역량태그"]
-            hit_count = sum(1 for t in terms if t in tag_text)
-            combined = sim + KEYWORD_MATCH_BONUS * hit_count
-            if combined >= MIN_ABSOLUTE_SCORE:
-                hits.append((idx, combined, f"유사도 {sim:.3f} · 키워드 {hit_count}개"))
-    else:
-        hits = []
+    if mode != "임베딩":
         for idx in range(len(db)):
             row = db.iloc[idx]
             blob = f"{row['아이디어명']} {row['필요역량태그']} {row['설명']}"
@@ -566,6 +573,10 @@ def inject_css(screen: int, upload_title: str = "", uploaded: bool = False):
    
     F5_ACTIONS = ('[data-testid="element-container"]:has(.f5-actions-anchor)'
                   '+[data-testid="stHorizontalBlock"]')
+    # 업로드된 파일 줄의 삭제(×) 버튼을 감싼 컨테이너
+    UP_DEL = ('[data-testid="stVerticalBlockBorderWrapper"]'
+              ':has(> div > [data-testid="stVerticalBlock"]'
+              ' > [data-testid="element-container"] .up-del-anchor)')
 
     st.markdown(f"""
 <style>
@@ -695,10 +706,28 @@ body{{color:var(--text)}}
   text-overflow:ellipsis;white-space:nowrap}}
 
 .up-size{{font-size:12.5px;color:var(--text-3);flex:1;white-space:nowrap}}
-.up-x{{flex-shrink:0;width:26px;height:26px;border-radius:6px;text-decoration:none;
-  display:flex;align-items:center;justify-content:center;
-  font-size:17px;line-height:1;color:var(--text-2)}}
-.up-x:hover{{background:var(--surface-2);color:var(--text)}}
+/* 업로드된 파일 줄 — 예전엔 통째로 HTML이었고 삭제가 <a href> 링크였다.
+   그 링크는 브라우저를 통째로 다시 열어(하얀 화면 + 앱 재시작) 버튼으로 바꿨다.
+   버튼이 실제 Streamlit 요소라 줄 전체를 컬럼 레이아웃으로 다시 짰고,
+   아래 규칙이 예전 .up-box / .up-file 모양을 그대로 재현한다. */
+[data-testid="element-container"]:has(.up-del-anchor){{display:none}}
+{UP_DEL}{{background:#FAFEFE;border:1.5px dashed var(--accent);border-radius:14px;
+  min-height:250px;padding:16px;margin-bottom:16px}}
+/* 카드 화면(1~3)의 세로 블록은 flex:1로 늘어난다 — 이 컨테이너까지 늘어나면
+   카드 안 배치가 틀어지므로 제자리 크기로 고정한다. */
+{UP_DEL}>div>[data-testid="stVerticalBlock"]{{flex:0 0 auto;gap:0}}
+{UP_DEL} [data-testid="stHorizontalBlock"]{{background:var(--surface);
+  border:1px solid var(--border);border-radius:10px;padding:10px 16px;
+  align-items:center;gap:12px;margin:0;flex-wrap:nowrap}}
+{UP_DEL} [data-testid="column"]{{min-width:0}}
+{UP_DEL} [data-testid="stHorizontalBlock"] .stButton{{display:flex;justify-content:flex-end}}
+{UP_DEL} [data-testid="stHorizontalBlock"] .stButton button{{width:26px;height:26px;
+  min-height:26px;padding:0;border-radius:6px;background:transparent;
+  color:var(--text-2);border:none;box-shadow:none;font-size:17px;
+  line-height:1;font-weight:400}}
+{UP_DEL} [data-testid="stHorizontalBlock"] .stButton button:hover{{
+  background:var(--surface-2);color:var(--text)}}
+.up-file-info{{display:flex;align-items:center;gap:12px;min-width:0}}
 
 /* 파일 업로더 */
 [data-testid="stFileUploaderDropzone"]{{
@@ -1093,14 +1122,25 @@ def screen_upload(step: int):
     if saved:
         fname = st.session_state.files.get(cfg["key"], "")
 
-        st.markdown(
-            f'<div class="up-box"><div class="up-file">'
-            f'<span class="up-doc"></span>'
-            f'<span class="up-name">{fname}</span>'
-            f'<span class="up-size">{len(saved) / 1024:,.1f}KB</span>'
-            f'<a class="up-x" href="?screen={step}&clear={cfg["key"]}" '
-            f'target="_self" title="파일 삭제">&times;</a>'
-            f"</div></div>", unsafe_allow_html=True)
+        # 삭제는 예전엔 <a href="?clear=..."> 링크였다. 그건 브라우저가 페이지를
+        # 통째로 다시 여는 진짜 이동이라 화면이 하얘지고 앱이 처음부터 다시 뜬다.
+        # Streamlit 버튼으로 바꾸고, CSS로 파일 줄 오른쪽 자리에 겹쳐 놓는다.
+        with st.container():
+            st.markdown('<span class="up-del-anchor"></span>', unsafe_allow_html=True)
+            info, delete = st.columns([1, 0.14], vertical_alignment="center")
+            with info:
+                st.markdown(
+                    f'<div class="up-file-info">'
+                    f'<span class="up-doc"></span>'
+                    f'<span class="up-name">{fname}</span>'
+                    f'<span class="up-size">{len(saved) / 1024:,.1f}KB</span>'
+                    f"</div>", unsafe_allow_html=True)
+            with delete:
+                if st.button("×", key=f"del_{cfg['key']}", help="파일 삭제"):
+                    st.session_state.uploaded.pop(cfg["key"], None)
+                    st.session_state.files.pop(cfg["key"], None)
+                    st.session_state.pop("profile", None)
+                    st.rerun()
     else:
         
         up = st.file_uploader(cfg["title"], type=cfg["types"], key=f"up_{cfg['key']}",
