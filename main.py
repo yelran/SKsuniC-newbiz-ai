@@ -1592,7 +1592,8 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
         # 새로 판단을 요청했으니 이전 채점(캐시)은 버려서 다시 계산하게 한다.
         st.session_state.pop(f"idea_score_{active_tab}", None)
         st.session_state[run_key] = True
-        st.rerun()
+        # 여기서 rerun하면 화면이 맨 위로 튄다. 아래 코드가 방금 저장한
+        # session_state를 그대로 읽으므로 rerun 없이 이어서 채점까지 간다.
 
     req = st.session_state.get(f"idea_req_{active_tab}")
     if not req:
@@ -1628,18 +1629,21 @@ def render_idea_tab(db: pd.DataFrame, profile: dict | None, org_ctx: dict):
             st.session_state[score_key] = None
         else:
             # 시장 추정도 LLM 호출이라 백그라운드로 돌린다
-            running, elapsed, result = _take_job(f"score:{active_tab}")
-            if result is not None:
-                value, error = result
-                st.session_state[score_key] = value
-                st.session_state[f"idea_score_error_{active_tab}"] = error
-                st.rerun()
+            slot = st.empty()
+            running, _elapsed, result = _take_job(f"score:{active_tab}")
             if running:
-                _job_progress("시장 데이터 추정 및 채점 중…", elapsed)
-            _start_job(f"score:{active_tab}", f4_4.calculate_idea_score,
-                       std_ids, idea_context, org_ctx,
-                       return_detail=True, unmatched_capabilities=unmatched_caps)
-            st.rerun()
+                result = _await_job(f"score:{active_tab}",
+                                    "시장 데이터 추정 및 채점 중…", slot)
+            if result is None:
+                _start_job(f"score:{active_tab}", f4_4.calculate_idea_score,
+                           std_ids, idea_context, org_ctx,
+                           return_detail=True, unmatched_capabilities=unmatched_caps)
+                result = _await_job(f"score:{active_tab}",
+                                    "시장 데이터 추정 및 채점 중…", slot)
+
+            value, error = result or (None, "채점 결과를 받지 못했습니다.")
+            st.session_state[score_key] = value
+            st.session_state[f"idea_score_error_{active_tab}"] = error
 
     score_error = st.session_state.get(f"idea_score_error_{active_tab}")
     if score_error:
@@ -1773,17 +1777,16 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
     saved = st.session_state.get(key)
 
     if saved is None:
-        running, elapsed, result = _take_job(f"judgment:{tab}")
-        if result is not None:
-            value, error = result
-            st.session_state[key] = value if error is None else {
-                "ranked_candidates": [], "used_llm": False, "error": error,
-            }
-            st.rerun()
+        slot = st.empty()
+        running, _elapsed, result = _take_job(f"judgment:{tab}")
         if running:
-            _job_progress("LLM 매칭 판단 중…", elapsed)
-        elif st.button("판단 근거 생성", key=f"gen_idea_judgment_{tab}",
-                       use_container_width=True):
+            result = _await_job(f"judgment:{tab}", "LLM 매칭 판단 중…", slot)
+
+        if result is None:
+            clicked = slot.button("판단 근거 생성", key=f"gen_idea_judgment_{tab}",
+                                  use_container_width=True)
+            if not clicked:
+                return
             cand = [{
                 "id": str(sel["아이디어ID"]), "name": str(sel["아이디어명"]),
                 "total_score": float(sel["총점"]),
@@ -1791,8 +1794,13 @@ def render_idea_judgment(sel, profile: dict | None, tab: int = 1) -> None:
                 "matched": list(sel["matched"]), "missing": list(sel["missing"]),
             }]
             _start_job(f"judgment:{tab}", f4_2.llm_match_judgment, profile, cand)
-            st.rerun()
-        return
+            result = _await_job(f"judgment:{tab}", "LLM 매칭 판단 중…", slot)
+
+        value, error = result or (None, "판단 결과를 받지 못했습니다.")
+        saved = value if error is None else {
+            "ranked_candidates": [], "used_llm": False, "error": error,
+        }
+        st.session_state[key] = saved
 
     ranked = saved["ranked_candidates"]
     top = ranked[0] if ranked else {}
@@ -1828,32 +1836,36 @@ def render_new_candidates(results: pd.DataFrame, profile: dict | None, all_candi
                     unsafe_allow_html=True)
 
         if saved is None:
-            st.markdown("""
+            # 제안 중에는 버튼 자리를 진행표시로 바꿔 끼운다(중복 클릭 방지 + 연결 유지).
+            slot = st.empty()
+            running, _elapsed, result = _take_job("new_cands")
+            if running:
+                result = _await_job("new_cands", "신규 후보 제안 중…", slot)
+
+            if result is None:
+                with slot.container():
+                    st.markdown("""
 <p class="section-title">LLM추천 후보</p>
 <p class="csub">신사업 DB 50건에 없는 아이디어를 조직 역량만 보고 LLM이 제안합니다.</p>
 """, unsafe_allow_html=True)
-
-            # 제안 중에는 버튼 대신 진행표시를 보여준다(중복 클릭 방지 + 연결 유지).
-            
-            running, elapsed, result = _take_job("new_cands")
-            if result is not None:
-                value, error = result
-                st.session_state[key] = value if error is None else {
-                    "new_candidates": [], "overall_summary": "",
-                    "used_llm": False, "error": error,
-                }
-                st.rerun()
-            if running:
-                _job_progress("신규 후보 제안 중…", elapsed)
-            elif st.button("신규 후보 제안받기", key="gen_new_cands", type="primary"):
+                    clicked = st.button("신규 후보 제안받기", key="gen_new_cands",
+                                        type="primary")
+                if not clicked:
+                    return
                 # Top-3(results)가 아니라 DB 50건 전체(all_candidates)를 기준으로
                 # 중복을 걸러야, 화면에 안 보이는 나머지 후보와 겹치는 제안을 막을 수 있다.
                 existing = [{"id": r["아이디어ID"], "name": r["아이디어명"],
                              "total_score": r["총점"]} for _, r in all_candidates.iterrows()]
                 _start_job("new_cands", f4_3.propose_new_candidates, profile, existing)
-                st.rerun()
-            return
-            
+                result = _await_job("new_cands", "신규 후보 제안 중…", slot)
+
+            value, error = result or (None, "제안 결과를 받지 못했습니다.")
+            saved = value if error is None else {
+                "new_candidates": [], "overall_summary": "",
+                "used_llm": False, "error": error,
+            }
+            st.session_state[key] = saved
+
 
         if saved.get("error"):
             st.markdown(f"""
@@ -2141,12 +2153,22 @@ def _take_job(name: str):
         return False, elapsed, jobs.pop(key)["result"]
 
 
-def _job_progress(label: str, elapsed: float) -> None:
-    """진행 표시를 그리고 잠시 뒤 화면을 다시 그린다 — 이 갱신이 연결을 살려 둔다."""
-    st.markdown(f'<p class="form-hint">{html.escape(label)} {int(elapsed)}초 경과</p>',
-                unsafe_allow_html=True)
-    time.sleep(LLM_POLL_SECONDS)
-    st.rerun()
+def _await_job(name: str, label: str, slot):
+    """작업이 끝날 때까지 '같은 실행 안에서' 기다린다. (값, 오류) 또는 None.
+
+    st.rerun()으로 폴링하면 rerun마다 화면이 맨 위로 되돌아가 스크롤이 튄다.
+    대신 slot(자리) 하나만 몇 초마다 다시 그리면, 그릴 때마다 WebSocket으로
+    메시지가 나가 연결은 살아 있으면서 화면 위치는 그대로 유지된다.
+    """
+    while True:
+        running, elapsed, result = _take_job(name)
+        if not running:
+            slot.empty()
+            return result
+        slot.markdown(
+            f'<p class="form-hint">{html.escape(label)} {int(elapsed)}초 경과</p>',
+            unsafe_allow_html=True)
+        time.sleep(LLM_POLL_SECONDS)
 
 
         
@@ -2193,24 +2215,27 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 f"비만점 평가항목 {len(nonfull_categories)}개 · "
                 f"{', '.join(nonfull_categories)} · 점수 결과에서 보완과제를 자동 추출합니다."
             )
-        st.markdown(f"""
+        # 생성은 백그라운드로 넘기고, 이 자리(slot)만 몇 초마다 다시 그려
+        # 연결을 살려 둔다. 페이지 전체를 rerun하지 않으므로 스크롤이 튀지 않는다.
+        slot = st.empty()
+        running, _elapsed, result = _take_job(f"gap:{report_key}")
+        if running:
+            # 새로고침 등으로 화면이 끊겼던 작업을 이어받는다.
+            result = _await_job(f"gap:{report_key}", "갭 리포트 생성 중…", slot)
+
+        if result is None:
+            with slot.container():
+                st.markdown(f"""
 <div class="note-card wait">
   <p class="section-title">역량 갭 리포트 · 보완 로드맵</p>
   <p>{html.escape(focus_text)}</p>
   <p class="csub">현재 {sel['획득']:.1f}점 / 목표 {target:.0f}점 기준으로
     보완전략(Build·Buy·Partner·Hire)과 단기·중기·장기 로드맵을 생성합니다.</p>
 </div>""", unsafe_allow_html=True)
-       
-               # 생성은 백그라운드로 넘기고, 화면은 주기적으로 다시 그려 연결을 살려 둔다.
-        running, elapsed, result = _take_job(f"gap:{report_key}")
-        if result is not None:
-            st.session_state[report_key] = result
-            st.rerun()
-            
-        if running:
-            _job_progress("갭 리포트 생성 중…", elapsed)
-            
-        elif st.button("AI 갭 리포트 생성", key=f"gen_{report_key}"):
+                clicked = st.button("AI 갭 리포트 생성", key=f"gen_{report_key}")
+            if not clicked:
+                return
+
             idea_context = _build_f5_idea_context(sel)
             url = _safe_cell(sel, "출처링크")
             sources = [{
@@ -2246,8 +2271,12 @@ def render_gap_report(sel, profile: dict | None, org_ctx: dict,
                 "organization_id": profile.get("organization_id"),
             }
             _start_job(f"gap:{report_key}", f5.generate_gap_report, gap_data, sources)
-            st.rerun()
-        return
+            result = _await_job(f"gap:{report_key}", "갭 리포트 생성 중…", slot)
+
+        # 결과를 손에 쥔 채 그대로 아래 렌더링으로 흘러간다(rerun 없음).
+        result = result or (None, "리포트 결과를 받지 못했습니다.")
+        st.session_state[report_key] = result
+        gap_report, gap_error = result
 
     if gap_error:
         st.markdown(f"""
