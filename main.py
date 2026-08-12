@@ -2086,8 +2086,17 @@ def _nonfull_score_categories(sel) -> list[str]:
 
 LLM_POLL_SECONDS = 5
 
-_JOBS: dict = {}
-_JOBS_LOCK = threading.Lock()
+
+@st.cache_resource(show_spinner=False)
+def _job_store():
+    """실행 중인 작업 저장소 — (작업dict, 락).
+
+    Streamlit은 rerun할 때마다 메인 스크립트를 '새로 만든 빈 네임스페이스'에서
+    다시 실행한다(ScriptRunner._new_module). 그래서 모듈 전역으로 둔 dict는
+    rerun마다 빈 dict로 초기화돼, 방금 시작한 작업이 곧바로 사라진다.
+    cache_resource로 감싸면 프로세스에 한 번만 만들어져 rerun을 넘어 유지된다.
+    """
+    return {}, threading.Lock()
 
 
 def _job_key(name: str) -> str:
@@ -2100,6 +2109,7 @@ def _job_key(name: str) -> str:
 
 def _start_job(name: str, fn, *args, **kwargs) -> None:
     """fn(*args, **kwargs)를 백그라운드에서 실행한다."""
+    jobs, lock = _job_store()
     key = _job_key(name)
 
     def _run():
@@ -2107,27 +2117,28 @@ def _start_job(name: str, fn, *args, **kwargs) -> None:
             outcome = (fn(*args, **kwargs), None)
         except Exception as exc:
             outcome = (None, str(exc))
-        with _JOBS_LOCK:
-            job = _JOBS.get(key)
+        with lock:
+            job = jobs.get(key)
             if job is not None:
                 job["result"] = outcome
 
-    with _JOBS_LOCK:
-        _JOBS[key] = {"started": time.time(), "result": None}
+    with lock:
+        jobs[key] = {"started": time.time(), "result": None}
     threading.Thread(target=_run, name=f"job-{name}", daemon=True).start()
 
 
 def _take_job(name: str):
     """(진행중, 경과초, (값, 오류)) — 결과가 나왔으면 꺼내면서 작업을 지운다."""
+    jobs, lock = _job_store()
     key = _job_key(name)
-    with _JOBS_LOCK:
-        job = _JOBS.get(key)
+    with lock:
+        job = jobs.get(key)
         if job is None:
             return False, 0.0, None
         elapsed = time.time() - job["started"]
         if job["result"] is None:
             return True, elapsed, None
-        return False, elapsed, _JOBS.pop(key)["result"]
+        return False, elapsed, jobs.pop(key)["result"]
 
 
 def _job_progress(label: str, elapsed: float) -> None:
