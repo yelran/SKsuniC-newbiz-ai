@@ -279,6 +279,7 @@ def export_gap_report_pdf(
         from reportlab.platypus import (
             CondPageBreak,
             HRFlowable,
+            KeepTogether,
             PageBreak,
             Paragraph,
             SimpleDocTemplate,
@@ -542,15 +543,11 @@ def export_gap_report_pdf(
         keepWithNext=True,
         spaceAfter=3,
     )
-    improvement = ParagraphStyle(
+    # 테두리·배경은 boxed_note()가 Table로 그린다. ParagraphStyle의 borderPadding은
+    # 높이 계산에 들어가지 않아 글씨가 상자 밖으로 넘친다(위 boxed_note 주석 참고).
+    improvement_body = ParagraphStyle(
         "F5PrintImprovement",
         parent=body,
-        backColor=mint_soft,
-        borderColor=border,
-        borderWidth=0.6,
-        borderPadding=(8, 9, 8, 9),
-        spaceBefore=2,
-        spaceAfter=8,
     )
     callout_title = ParagraphStyle(
         "F5PrintCalloutTitle",
@@ -903,6 +900,30 @@ def export_gap_report_pdf(
         )
         return box
 
+    def boxed_note(value: Any, style: ParagraphStyle = body) -> Table:
+        """테두리 있는 본문 상자.
+
+        ParagraphStyle의 borderPadding으로 같은 모양을 내면 글씨가 상자 밖으로
+        넘친다 — ReportLab의 Paragraph.wrap()이 borderPadding을 높이에 넣지 않아
+        위아래 여백(8pt씩)만큼 자리를 덜 잡기 때문이다(reportlab 4.5.1에서 실측).
+        Table은 padding을 높이에 정확히 반영하므로 한 칸짜리 표로 대신한다.
+        """
+        box = Table([[p(value, style)]], colWidths=[doc.width])
+        box.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, -1), mint_soft),
+                    ("BOX", (0, 0), (-1, -1), 0.6, border),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 9),
+                    ("RIGHTPADDING", (0, 0), (-1, -1), 9),
+                    ("TOPPADDING", (0, 0), (-1, -1), 8),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                ]
+            )
+        )
+        return box
+
     def score_radar(categories: Sequence[Mapping[str, Any]]) -> Table:
         """사이트의 평가항목 레이더를 PDF용 벡터 그래프로 재현한다."""
 
@@ -1127,29 +1148,33 @@ def export_gap_report_pdf(
         )
     )
 
+    # 표지(캔버스로 직접 그린다) 다음의 요약 면. 제목부터 레이더 그래프까지를
+    # KeepTogether로 묶어, 제목이나 종합 판단이 길어져도 그래프가 다음 장으로
+    # 밀려나지 않게 한다.
     story = [
         Spacer(1, 245 * mm),
         PageBreak(),
-        Spacer(1, 17 * mm),
-        p("SUNNY C · NEW BUSINESS DIAGNOSTIC AI", eyebrow),
-        p("역량 갭 리포트", cover_title),
-        p(subject, cover_subject),
-        p("부족 역량 진단 · 보완전략 · 실행 로드맵", cover_subtitle),
-        HRFlowable(
-            width="100%",
-            thickness=1.4,
-            color=teal,
-            spaceBefore=5,
-            spaceAfter=13,
-        ),
-        labeled("평가 계약", view.get("score_contract") or "미확인", small),
-        labeled("생성일", date.today().strftime("%Y.%m.%d"), small),
-        Spacer(1, 7),
-        metrics,
-        Spacer(1, 13),
-        callout("종합 판단", view["headline"]),
-        Spacer(1, 10),
-        score_radar(view["categories"]),
+        KeepTogether([
+            p("SUNNY C · NEW BUSINESS DIAGNOSTIC AI", eyebrow),
+            p("역량 갭 리포트", cover_title),
+            p(subject, cover_subject),
+            p("부족 역량 진단 · 보완전략 · 실행 로드맵", cover_subtitle),
+            HRFlowable(
+                width="100%",
+                thickness=1.4,
+                color=teal,
+                spaceBefore=5,
+                spaceAfter=13,
+            ),
+            labeled("평가 계약", view.get("score_contract") or "미확인", small),
+            labeled("생성일", date.today().strftime("%Y.%m.%d"), small),
+            Spacer(1, 7),
+            metrics,
+            Spacer(1, 13),
+            callout("종합 판단", view["headline"]),
+            Spacer(1, 10),
+            score_radar(view["categories"]),
+        ]),
         PageBreak(),
         section_band(
             "00",
@@ -1216,9 +1241,6 @@ def export_gap_report_pdf(
                 labeled("종합 분석", category["summary"]),
             ]
         )
-        ref = evidence_ref(category)
-        if ref:
-            story.append(p(f"근거 {ref}", micro))
         for subitem in category.get("subitem_analysis", []):
             subitem_header = Table(
                 [[
@@ -1255,12 +1277,10 @@ def export_gap_report_pdf(
                     p("판단", label),
                     p(subitem["assessment"], compact),
                     p("보완점", label),
-                    p(subitem["improvement"], improvement),
+                    boxed_note(subitem["improvement"], improvement_body),
+                    Spacer(1, 8),
                 ]
             )
-            ref = evidence_ref(subitem)
-            if ref:
-                story.append(p(f"근거 {ref}", micro))
         story.extend(
             [
                 Spacer(1, 5),
@@ -1278,7 +1298,7 @@ def export_gap_report_pdf(
             PageBreak(),
             section_band(
                 "02",
-                "F5-1 · 부족 역량 진단",
+                "부족 역량 진단",
                 "현재 조직과 사업 요구조건의 차이, 사업상 영향과 최우선 확보 방향을 진단합니다.",
             ),
             Spacer(1, 10),
@@ -1329,9 +1349,6 @@ def export_gap_report_pdf(
                 ),
             ]
         )
-        ref = evidence_ref(gap)
-        if ref:
-            story.append(p(f"근거 {ref}", micro))
         story.append(Spacer(1, 12))
 
     story.extend(
@@ -1339,7 +1356,7 @@ def export_gap_report_pdf(
             PageBreak(),
             section_band(
                 "03",
-                "F5-2 · 부족 역량별 보완전략",
+                "부족 역량별 보완전략",
                 "Build·Buy·Partner·Hire를 비교하고 권장 여부와 구체 실행조건을 제시합니다.",
             ),
             Spacer(1, 10),
@@ -1452,9 +1469,6 @@ def export_gap_report_pdf(
                     p(item["rationale"], compact),
                 ]
             )
-            ref = evidence_ref(item)
-            if ref:
-                story.append(p(f"근거 {ref}", micro))
             if item_index < len(items) or group_index < len(strategy_groups):
                 story.append(Spacer(1, 7))
         if group_index < len(strategy_groups):
@@ -1472,7 +1486,7 @@ def export_gap_report_pdf(
             PageBreak(),
             section_band(
                 "04",
-                "F5-3 · 실행 로드맵",
+                "실행 로드맵",
                 "단기 검증에서 중기 파일럿, 장기 운영 확장으로 이어지는 실행 흐름입니다.",
             ),
             Spacer(1, 10),
@@ -1559,58 +1573,7 @@ def export_gap_report_pdf(
             start=1,
         ):
             story.append(labeled(f"기준 {index}", criterion, compact))
-        ref = evidence_ref(node)
-        if ref:
-            story.append(p(f"근거 {ref}", micro))
         story.append(Spacer(1, 12))
-
-    appendix_needed = bool(
-        evidence_lookup
-        or view["unverified_items"]
-        or view["warnings"]
-    )
-    if appendix_needed:
-        story.extend(
-            [
-                PageBreak(),
-                section_band(
-                    "05",
-                    "근거 및 추가 확인사항",
-                    "본문의 근거 표기를 한곳에 모아 출처와 추가 확인 내용을 정리했습니다.",
-                ),
-                Spacer(1, 10),
-            ]
-        )
-        if evidence_lookup:
-            story.append(p("근거 목록", heading))
-            for evidence, ref in evidence_lookup.items():
-                evidence_row = Table(
-                    [[p(ref, white_badge), p(evidence, small)]],
-                    colWidths=[16 * mm, doc.width - 16 * mm],
-                )
-                evidence_row.setStyle(
-                    TableStyle(
-                        [
-                            ("BACKGROUND", (0, 0), (0, 0), teal),
-                            ("BACKGROUND", (1, 0), (1, 0), mint_soft),
-                            ("BOX", (0, 0), (-1, -1), 0.55, border),
-                            ("VALIGN", (0, 0), (-1, -1), "TOP"),
-                            ("LEFTPADDING", (0, 0), (-1, -1), 7),
-                            ("RIGHTPADDING", (0, 0), (-1, -1), 7),
-                            ("TOPPADDING", (0, 0), (-1, -1), 6),
-                            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
-                        ]
-                    )
-                )
-                story.extend([evidence_row, Spacer(1, 4)])
-        if view["unverified_items"]:
-            story.extend([Spacer(1, 7), p("추가 확인이 필요한 사항", heading)])
-            for index, item in enumerate(view["unverified_items"], start=1):
-                story.append(labeled(f"{index}.", item, compact))
-        if view["warnings"]:
-            story.extend([Spacer(1, 7), p("입력 및 출처 처리 안내", heading)])
-            for index, item in enumerate(view["warnings"], start=1):
-                story.append(labeled(f"{index}.", item, compact))
 
     doc.build(story, onFirstPage=draw_page, onLaterPages=draw_page)
     return buffer.getvalue()
